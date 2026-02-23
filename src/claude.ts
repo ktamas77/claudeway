@@ -33,7 +33,7 @@ function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promi
     const env = { ...process.env };
     delete env.CLAUDECODE;
     // Ensure HOME is set — launchd may not provide it
-    if (!env.HOME) env.HOME = '/Users/' + (env.USER ?? 'tamas');
+    if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
 
     const proc = spawn('claude', args, {
       cwd,
