@@ -1,4 +1,6 @@
 import { spawn } from 'child_process';
+import { existsSync } from 'fs';
+import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
 import { getConfigPath } from './config.js';
 
@@ -106,8 +108,15 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
     '--append-system-prompt',
     prompt,
     '--dangerously-skip-permissions',
-    message,
   ];
+
+  // Pass MCP config if mcp.json exists in the project root
+  const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
+  if (existsSync(mcpConfigPath)) {
+    args.push('--mcp-config', mcpConfigPath);
+  }
+
+  args.push(message);
 
   // Try with session ID (resumes if session exists, creates new if not)
   try {

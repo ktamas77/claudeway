@@ -80,6 +80,19 @@ Create `config.json`:
 }
 ```
 
+Optionally, create `mcp.json` to give Claude access to MCP servers (e.g. persistent memory). See `mcp.example.json`:
+```json
+{
+  "mcpServers": {
+    "forever": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@squidcode/forever-plugin"]
+    }
+  }
+}
+```
+
 ### 3. Run
 
 ```bash
