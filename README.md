@@ -74,7 +74,7 @@ Create `config.json`:
   },
   "defaults": {
     "model": "opus",
-    "systemPrompt": "Be concise. Format responses for Slack mrkdwn. You have access to the Claudeway config at CONFIG_PATH which you can read and edit when asked to add, remove, or update channel mappings.",
+    "systemPrompt": "Format all responses using Slack mrkdwn syntax (NOT standard Markdown). Key rules: *bold* (single asterisk), _italic_ (underscore), ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag), > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes. Keep responses concise. You have access to the Claudeway config at CONFIG_PATH which you can read and edit when asked to add, remove, or update channel mappings.",
     "timeoutMs": 300000
   }
 }
@@ -93,57 +93,29 @@ npm run dev
 
 ### 4. Run as a Background Service (macOS)
 
-Create a LaunchAgent to start Claudeway automatically on login:
+The included install script sets up a macOS LaunchAgent that:
+- Starts Claudeway automatically on login
+- Restarts it automatically if it crashes (with a 10-second throttle to prevent crash loops)
+- Only restarts on abnormal exits (clean `SIGTERM`/`SIGINT` shutdowns stay stopped)
 
 ```bash
-cat > ~/Library/LaunchAgents/com.claudeway.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.claudeway</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/opt/homebrew/bin/node</string>
-        <string>/path/to/claudeway/node_modules/.bin/tsx</string>
-        <string>/path/to/claudeway/src/index.ts</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/path/to/claudeway</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>HOME</key>
-        <string>/Users/youruser</string>
-        <key>USER</key>
-        <string>youruser</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/path/to/claudeway/claudeway.log</string>
-    <key>StandardErrorPath</key>
-    <string>/path/to/claudeway/claudeway.log</string>
-</dict>
-</plist>
-EOF
+./scripts/install.sh
 ```
 
-Then load it:
+To stop and remove the service:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.claudeway.plist
+./scripts/uninstall.sh
 ```
 
 Useful commands:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.claudeway.plist   # stop
-launchctl list | grep claudeway                                # status
-tail -f ~/dev/ktamas77/claudeway/claudeway.log                 # logs
+launchctl list | grep claudeway                    # check status
+tail -f claudeway.log                              # view logs
+launchctl unload ~/Library/LaunchAgents/com.claudeway.plist   # stop temporarily
+launchctl load -w ~/Library/LaunchAgents/com.claudeway.plist  # start again
 ```
+
+The install script auto-detects your `node` path, project directory, and user environment. The generated plist is placed at `~/Library/LaunchAgents/com.claudeway.plist`.
 
 ## Channel Config Options
 
