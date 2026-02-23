@@ -87,6 +87,7 @@ describe('parseStreamLine — result events', () => {
       text: 'The answer is 42',
       sessionId: 'abc-123',
       cost: 0.0042,
+      tokens: null,
     });
   });
 
@@ -117,6 +118,23 @@ describe('parseStreamLine — result events', () => {
     const line = JSON.stringify({ type: 'result', session_id: 'x', cost_usd: 0 });
     const event = parseStreamLine(line);
     expect(event?.type === 'result' && event.text).toBe('');
+  });
+
+  it('sums input_tokens + output_tokens from usage field', () => {
+    const line = JSON.stringify({
+      type: 'result',
+      result: 'hi',
+      session_id: 'x',
+      usage: { input_tokens: 100, output_tokens: 50 },
+    });
+    const event = parseStreamLine(line);
+    expect(event?.type === 'result' && event.tokens).toBe(150);
+  });
+
+  it('returns null tokens when usage field is absent', () => {
+    const line = JSON.stringify({ type: 'result', result: 'hi', session_id: 'x', cost_usd: 0.01 });
+    const event = parseStreamLine(line);
+    expect(event?.type === 'result' && event.tokens).toBeNull();
   });
 });
 

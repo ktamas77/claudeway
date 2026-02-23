@@ -188,17 +188,19 @@ Control running Claude CLI processes directly from Slack with magic commands. Th
 
 | Command | Description |
 |---------|-------------|
-| `!ps` | List all active processes with channel name, runtime, prompt snippet, and queue depth |
+| `!ps` | List all active processes with channel, runtime, message count, token usage, and queue depth |
 | `!kill` | Kill the process running in the current channel |
 | `!kill #channel` | Kill a process in another channel by name |
 | `!killall` | Kill all running processes |
+| `!nudge` | Send SIGINT to the process in the current channel — interrupts a long tool call and prompts Claude to wrap up |
+| `!nudge #channel` | Nudge a process in another channel by name |
 
 Example `!ps` output:
 ```
 :gear: Active Processes (2/8)
 
-• #recycler — 18m 30s — "ok and don't forget to update your work log..."
-• #claudeway — 26m 39s — "i think we can kill the reminders service..."
+• #recycler — 18m 30s — 4 msgs — 18,234 tokens — "ok and don't forget to update your work log..." (idle)
+• #claudeway — 26m 39s — 2 msgs — 9,103 tokens — "i think we can kill the reminders service..." :hourglass_flowing_sand:
 
 Queued: 5 messages (3 recycler, 2 claudeway)
 ```

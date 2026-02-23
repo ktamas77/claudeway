@@ -25,6 +25,7 @@ export interface ClaudeResult {
   response: string;
   sessionId: string | null;
   cost: number | null;
+  tokens: number | null;
 }
 
 // Claudeway namespace UUID for deterministic session IDs
@@ -41,6 +42,9 @@ interface ActiveProcess {
   sessionId: string;
   startedAt: Date;
   message: string;
+  messageCount: number;
+  totalCost: number;
+  totalTokens: number;
 }
 
 const processRegistry = new Map<string, ActiveProcess>();
@@ -53,6 +57,9 @@ interface PersistentProcessEntry {
   sessionId: string;
   startedAt: Date;
   lastMessage: string;
+  messageCount: number;
+  totalCost: number;
+  totalTokens: number;
   idleTimer: ReturnType<typeof setTimeout>;
   lineBuffer: string;
   currentTurn: {
@@ -67,19 +74,31 @@ interface PersistentProcessEntry {
 
 const persistentRegistry = new Map<string, PersistentProcessEntry>();
 
-export function getActiveProcesses(): (
-  | Omit<ActiveProcess, 'proc'>
-  | { channelId: string; sessionId: string; startedAt: Date; message: string }
-)[] {
+export interface ActiveProcessInfo {
+  channelId: string;
+  sessionId: string;
+  startedAt: Date;
+  message: string;
+  messageCount: number;
+  totalCost: number;
+  totalTokens: number;
+  isActive: boolean;
+}
+
+export function getActiveProcesses(): ActiveProcessInfo[] {
   const oneshot = Array.from(processRegistry.values()).map(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ({ proc, ...rest }) => rest,
+    ({ proc, ...rest }) => ({ ...rest, isActive: true }),
   );
   const persistent = Array.from(persistentRegistry.values()).map((entry) => ({
     channelId: entry.channelId,
     sessionId: entry.sessionId,
     startedAt: entry.startedAt,
-    message: entry.currentTurn ? entry.lastMessage : `${entry.lastMessage} (idle)`,
+    message: entry.lastMessage,
+    messageCount: entry.messageCount,
+    totalCost: entry.totalCost,
+    totalTokens: entry.totalTokens,
+    isActive: entry.currentTurn !== null,
   }));
   return [...oneshot, ...persistent];
 }
@@ -94,6 +113,20 @@ export function killProcess(channelId: string): boolean {
   if (persistentEntry) {
     clearTimeout(persistentEntry.idleTimer);
     persistentEntry.proc.kill('SIGTERM');
+    return true;
+  }
+  return false;
+}
+
+export function nudgeProcess(channelId: string): boolean {
+  const entry = processRegistry.get(channelId);
+  if (entry) {
+    entry.proc.kill('SIGINT');
+    return true;
+  }
+  const persistentEntry = persistentRegistry.get(channelId);
+  if (persistentEntry) {
+    persistentEntry.proc.kill('SIGINT');
     return true;
   }
   return false;
@@ -125,7 +158,13 @@ export function deriveSessionId(channelId: string, folder: string): string {
 
 export type StreamLineEvent =
   | { type: 'text_delta'; text: string }
-  | { type: 'result'; text: string; sessionId: string | null; cost: number | null }
+  | {
+      type: 'result';
+      text: string;
+      sessionId: string | null;
+      cost: number | null;
+      tokens: number | null;
+    }
   | { type: 'user_receipt' }
   | null;
 
@@ -150,11 +189,14 @@ export function parseStreamLine(line: string): StreamLineEvent {
 
     // Result event
     if (obj.type === 'result') {
+      const usage = obj.usage;
+      const tokens = usage != null ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : null;
       return {
         type: 'result',
         text: obj.result ?? '',
         sessionId: obj.session_id ?? null,
         cost: obj.cost_usd ?? obj.total_cost_usd ?? null,
+        tokens,
       };
     }
 
@@ -198,6 +240,9 @@ function runClaudeProcess(
       sessionId,
       startedAt: new Date(),
       message: message.substring(0, 80),
+      messageCount: 1,
+      totalCost: 0,
+      totalTokens: 0,
     });
 
     let stdout = '';
@@ -243,16 +288,19 @@ function runClaudeProcess(
 
       try {
         const json = JSON.parse(stdout);
+        const usage = json.usage;
         resolve({
           response: json.result ?? json.content ?? stdout,
           sessionId: json.session_id ?? null,
           cost: json.cost_usd ?? null,
+          tokens: usage != null ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : null,
         });
       } catch {
         resolve({
           response: stdout.trim(),
           sessionId: null,
           cost: null,
+          tokens: null,
         });
       }
     });
@@ -284,12 +332,16 @@ function runClaudeStreamingProcess(
       sessionId: registrySessionId,
       startedAt: new Date(),
       message: message.substring(0, 80),
+      messageCount: 1,
+      totalCost: 0,
+      totalTokens: 0,
     });
 
     let stderr = '';
     let fullText = '';
     let sessionId: string | null = null;
     let cost: number | null = null;
+    let tokens: number | null = null;
     let lineBuffer = '';
 
     function processLine(line: string) {
@@ -301,6 +353,7 @@ function runClaudeStreamingProcess(
       } else if (event.type === 'result') {
         sessionId = event.sessionId ?? sessionId;
         cost = event.cost ?? cost;
+        tokens = event.tokens ?? tokens;
         if (event.text) fullText = event.text;
       }
     }
@@ -357,6 +410,7 @@ function runClaudeStreamingProcess(
         response: fullText,
         sessionId,
         cost,
+        tokens,
       });
     });
 
@@ -592,6 +646,9 @@ function createPersistentProcess(
     sessionId,
     startedAt: new Date(),
     lastMessage: '',
+    messageCount: 0,
+    totalCost: 0,
+    totalTokens: 0,
     idleTimer: setTimeout(() => {}, 0), // placeholder; reset immediately below
     lineBuffer: '',
     currentTurn: null,
@@ -644,6 +701,7 @@ function createPersistentProcess(
           response: turn.fullText,
           sessionId: turn.sessionId,
           cost: turn.cost,
+          tokens: null,
         });
       }
     }
@@ -679,12 +737,16 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
   }
 
   if (event.type === 'result' && entry.currentTurn) {
+    entry.messageCount++;
+    entry.totalCost += event.cost ?? 0;
+    entry.totalTokens += event.tokens ?? 0;
     const turn = entry.currentTurn;
     entry.currentTurn = null;
     turn.resolve({
       response: event.text || turn.fullText,
       sessionId: event.sessionId ?? turn.sessionId,
       cost: event.cost ?? turn.cost,
+      tokens: event.tokens,
     });
   }
 }

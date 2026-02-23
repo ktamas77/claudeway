@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.0] - 2026-02-23
+
+### Added
+- **`!nudge` command**: Send SIGINT to a running Claude process to interrupt a long tool call and prompt it to wrap up. Works on both persistent and oneshot processes.
+  - `!nudge` — nudge the process in the current channel
+  - `!nudge #channel` — nudge a process in another channel by name
+- **Richer `!ps` output**: Each process line now shows message count, token count (falling back to cost if tokens are unavailable), and an active `:hourglass_flowing_sand:` / `(idle)` indicator
+  - Token/cost omitted for fresh or in-flight oneshot processes (not available until exit)
+  - Persistent processes accumulate stats turn-by-turn
+
 ## [0.7.0] - 2026-02-23
 
 ### Added

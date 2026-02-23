@@ -11,6 +11,7 @@ import {
   getActiveProcesses,
   killProcess,
   killAllProcesses,
+  nudgeProcess,
 } from './claude.js';
 import { enqueue, dequeue, getPendingForChannel, getPending, type QueuedMessage } from './queue.js';
 
@@ -783,7 +784,16 @@ async function handlePs(channelId: string, threadTs: string, client: WebClient):
       const name = getChannelName(p.channelId);
       const duration = formatDuration(p.startedAt);
       const snippet = p.message.length >= 80 ? p.message + '...' : p.message;
-      return `\u2022 #${name} \u2014 ${duration} \u2014 "${snippet}"`;
+      const msgs =
+        p.messageCount > 0 ? ` \u2014 ${p.messageCount} msg${p.messageCount !== 1 ? 's' : ''}` : '';
+      const stats =
+        p.totalTokens > 0
+          ? ` \u2014 ${p.totalTokens.toLocaleString()} tokens`
+          : p.totalCost > 0
+            ? ` \u2014 $${p.totalCost.toFixed(4)}`
+            : '';
+      const status = p.isActive ? ' :hourglass_flowing_sand:' : ' (idle)';
+      return `\u2022 #${name} \u2014 ${duration}${msgs}${stats} \u2014 "${snippet}"${status}`;
     });
     text = `:gear: *Active Processes (${processes.length}/${MAX_CONCURRENT_PROCESSES})*\n\n${lines.join('\n')}`;
   }
@@ -865,6 +875,42 @@ async function handleKillAll(
   });
 }
 
+async function handleNudge(
+  targetChannelId: string,
+  responseChannelId: string,
+  threadTs: string,
+  client: WebClient,
+): Promise<void> {
+  const processes = getActiveProcesses();
+  const target = processes.find((p) => p.channelId === targetChannelId);
+
+  if (!target) {
+    const name = getChannelName(targetChannelId);
+    await client.chat.postMessage({
+      channel: responseChannelId,
+      thread_ts: threadTs,
+      text: `:warning: No active process in #${name}`,
+    });
+    return;
+  }
+
+  const name = getChannelName(targetChannelId);
+  const nudged = nudgeProcess(targetChannelId);
+  if (nudged) {
+    await client.chat.postMessage({
+      channel: responseChannelId,
+      thread_ts: threadTs,
+      text: `:bell: Nudged #${name} (sent SIGINT — process may wrap up or continue)`,
+    });
+  } else {
+    await client.chat.postMessage({
+      channel: responseChannelId,
+      thread_ts: threadTs,
+      text: `:warning: Failed to nudge process in #${name}`,
+    });
+  }
+}
+
 async function handleMagicCommand(
   text: string,
   channelId: string,
@@ -909,6 +955,36 @@ async function handleMagicCommand(
 
     if (resolvedId) {
       await handleKill(resolvedId, channelId, threadTs, client);
+    }
+    return true;
+  }
+
+  if (trimmed === '!nudge') {
+    await handleNudge(channelId, channelId, threadTs, client);
+    return true;
+  }
+
+  // !nudge #channel, !nudge channel, or !nudge <#C123|channel>
+  const nudgeMatch = trimmed.match(/^!nudge\s+(?:<#(\w+)(?:\|[^>]*)?>|#?(\S+))$/);
+  if (nudgeMatch) {
+    const slackChannelId = nudgeMatch[1];
+    const targetName = nudgeMatch[2];
+
+    let resolvedId: string | null = slackChannelId ?? null;
+    if (!resolvedId && targetName) {
+      resolvedId = findChannelIdByName(targetName);
+      if (!resolvedId) {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: `:warning: No configured channel named "${targetName}"`,
+        });
+        return true;
+      }
+    }
+
+    if (resolvedId) {
+      await handleNudge(resolvedId, channelId, threadTs, client);
     }
     return true;
   }
