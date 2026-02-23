@@ -16,6 +16,12 @@ interface SlackMessage {
 const MAX_MESSAGE_LENGTH = 3900;
 const FILE_THRESHOLD = 12000;
 
+// Per-channel processing lock — one message at a time per channel
+const channelBusy = new Set<string>();
+
+// Per-channel message queue — holds the latest pending message per channel
+const channelQueue = new Map<string, { msg: SlackMessage; client: WebClient }>();
+
 function splitMessage(text: string): string[] {
   const chunks: string[] = [];
   let remaining = text;
@@ -61,6 +67,94 @@ async function sendResponse(
   }
 }
 
+async function safeReact(
+  client: WebClient,
+  channel: string,
+  timestamp: string,
+  name: string,
+  action: 'add' | 'remove' = 'add',
+): Promise<void> {
+  try {
+    if (action === 'add') {
+      await client.reactions.add({ channel, timestamp, name });
+    } else {
+      await client.reactions.remove({ channel, timestamp, name });
+    }
+  } catch {
+    // Ignore reaction errors
+  }
+}
+
+async function processMessage(msg: SlackMessage, client: WebClient): Promise<void> {
+  let config;
+  try {
+    config = loadConfig();
+  } catch (err) {
+    console.error('Failed to load config:', err);
+    return;
+  }
+
+  const channelConfig = resolvedChannelConfig(config, msg.channel);
+  if (!channelConfig) return;
+
+  const threadTs = msg.thread_ts ?? msg.ts;
+
+  await safeReact(client, msg.channel, msg.ts, 'hourglass_flowing_sand');
+
+  try {
+    console.log(`[${channelConfig.name}] Processing: ${msg.text!.substring(0, 80)}...`);
+
+    const result = await runClaude({
+      message: msg.text!,
+      cwd: channelConfig.folder,
+      model: channelConfig.model,
+      systemPrompt: channelConfig.systemPrompt,
+      timeoutMs: channelConfig.timeoutMs,
+      channelId: msg.channel,
+    });
+
+    await safeReact(client, msg.channel, msg.ts, 'hourglass_flowing_sand', 'remove');
+    await safeReact(client, msg.channel, msg.ts, 'white_check_mark');
+
+    await sendResponse(client, msg.channel, threadTs, result.response);
+
+    if (result.cost !== null) {
+      console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+    }
+  } catch (err) {
+    await safeReact(client, msg.channel, msg.ts, 'hourglass_flowing_sand', 'remove');
+    await safeReact(client, msg.channel, msg.ts, 'x');
+
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[${channelConfig.name}] Error:`, errorMsg);
+
+    try {
+      await client.chat.postMessage({
+        channel: msg.channel,
+        thread_ts: threadTs,
+        text: `:warning: Error: ${errorMsg}`,
+      });
+    } catch (replyErr) {
+      console.error(`[${channelConfig.name}] Failed to send error reply:`, replyErr);
+    }
+  }
+}
+
+async function drainQueue(channelId: string): Promise<void> {
+  channelBusy.add(channelId);
+
+  try {
+    // Process current + any queued message
+    while (channelQueue.has(channelId)) {
+      const queued = channelQueue.get(channelId)!;
+      channelQueue.delete(channelId);
+      await processMessage(queued.msg, queued.client);
+    }
+  } finally {
+    channelBusy.delete(channelId);
+  }
+}
+
 export function registerMessageHandler(app: App): void {
   app.message(async ({ message, client }) => {
     const msg = message as SlackMessage;
@@ -69,91 +163,25 @@ export function registerMessageHandler(app: App): void {
     if (msg.subtype || msg.bot_id) return;
     if (!msg.text) return;
 
-    // Reload config on every message so self-edits take effect
-    let config;
+    // Quick config check — don't queue messages for unconfigured channels
     try {
-      config = loadConfig();
-    } catch (err) {
-      console.error('Failed to load config:', err);
+      const config = loadConfig();
+      if (!resolvedChannelConfig(config, msg.channel)) return;
+    } catch {
       return;
     }
 
-    const channelConfig = resolvedChannelConfig(config, msg.channel);
-    if (!channelConfig) return;
-
-    const threadTs = msg.thread_ts ?? msg.ts;
-
-    // Add hourglass reaction to show we're processing
-    try {
-      await client.reactions.add({
-        channel: msg.channel,
-        timestamp: msg.ts,
-        name: 'hourglass_flowing_sand',
-      });
-    } catch {
-      // Reaction may fail if already added, ignore
+    if (channelBusy.has(msg.channel)) {
+      // Channel is busy — queue this message (replaces any previous queued message)
+      console.log(`[${msg.channel}] Busy, queuing message`);
+      channelQueue.set(msg.channel, { msg, client });
+      return;
     }
 
-    try {
-      console.log(
-        `[${channelConfig.name}] Processing message from ${msg.user}: ${msg.text.substring(0, 80)}...`,
-      );
-
-      const result = await runClaude({
-        message: msg.text,
-        cwd: channelConfig.folder,
-        model: channelConfig.model,
-        systemPrompt: channelConfig.systemPrompt,
-        timeoutMs: channelConfig.timeoutMs,
-        channelId: msg.channel,
-      });
-
-      // Remove hourglass, add checkmark
-      try {
-        await client.reactions.remove({
-          channel: msg.channel,
-          timestamp: msg.ts,
-          name: 'hourglass_flowing_sand',
-        });
-        await client.reactions.add({
-          channel: msg.channel,
-          timestamp: msg.ts,
-          name: 'white_check_mark',
-        });
-      } catch {
-        // Ignore reaction errors
-      }
-
-      await sendResponse(client, msg.channel, threadTs, result.response);
-
-      if (result.cost !== null) {
-        console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
-      }
-    } catch (err) {
-      // Remove hourglass, add error reaction
-      try {
-        await client.reactions.remove({
-          channel: msg.channel,
-          timestamp: msg.ts,
-          name: 'hourglass_flowing_sand',
-        });
-        await client.reactions.add({
-          channel: msg.channel,
-          timestamp: msg.ts,
-          name: 'x',
-        });
-      } catch {
-        // Ignore reaction errors
-      }
-
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[${channelConfig.name}] Error:`, errorMsg);
-
-      await client.chat.postMessage({
-        channel: msg.channel,
-        thread_ts: threadTs,
-        text: `:warning: Error: ${errorMsg}`,
-      });
-    }
+    // Not busy — put in queue and start draining
+    channelQueue.set(msg.channel, { msg, client });
+    drainQueue(msg.channel).catch((err) => {
+      console.error(`[${msg.channel}] Queue drain error:`, err);
+    });
   });
 }
