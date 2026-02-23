@@ -105,6 +105,7 @@ export function registerMessageHandler(app: App): void {
         model: channelConfig.model,
         systemPrompt: channelConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
+        channelId: msg.channel,
       });
 
       // Remove hourglass, add checkmark

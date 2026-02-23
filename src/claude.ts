@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { v5 as uuidv5 } from 'uuid';
 import { getConfigPath } from './config.js';
 
 export interface ClaudeOptions {
@@ -7,6 +8,7 @@ export interface ClaudeOptions {
   model: string;
   systemPrompt: string;
   timeoutMs: number;
+  channelId: string;
 }
 
 export interface ClaudeResult {
@@ -15,30 +17,23 @@ export interface ClaudeResult {
   cost: number | null;
 }
 
-export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
-  const { message, cwd, model, systemPrompt, timeoutMs } = options;
+// Claudeway namespace UUID for deterministic session IDs
+const CLAUDEWAY_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
-  const configPath = getConfigPath();
-  const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
+/**
+ * Generate a deterministic session UUID from channel ID + folder path.
+ * Same channel+folder always produces the same session ID, surviving restarts.
+ */
+export function deriveSessionId(channelId: string, folder: string): string {
+  return uuidv5(`${channelId}:${folder}`, CLAUDEWAY_NAMESPACE);
+}
 
-  const args = [
-    '-p',
-    '--continue',
-    '--output-format',
-    'json',
-    '--model',
-    model,
-    '--append-system-prompt',
-    prompt,
-    '--dangerously-skip-permissions',
-    message,
-  ];
-
+function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawn('claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, CLAUDECODE: undefined },
     });
 
     let stdout = '';
@@ -73,7 +68,6 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
           cost: json.cost_usd ?? null,
         });
       } catch {
-        // If JSON parsing fails, treat stdout as plain text
         resolve({
           response: stdout.trim(),
           sessionId: null,
@@ -87,4 +81,38 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
   });
+}
+
+export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
+  const { message, cwd, model, systemPrompt, timeoutMs, channelId } = options;
+
+  const configPath = getConfigPath();
+  const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
+  const sessionId = deriveSessionId(channelId, cwd);
+
+  const args = [
+    '-p',
+    '--output-format',
+    'json',
+    '--model',
+    model,
+    '--session-id',
+    sessionId,
+    '--append-system-prompt',
+    prompt,
+    '--dangerously-skip-permissions',
+    message,
+  ];
+
+  // Try with session ID (resumes if session exists, creates new if not)
+  try {
+    return await runClaudeProcess(args, cwd, timeoutMs);
+  } catch {
+    // If session-id fails, fall back to no session flag
+    console.log(`[${channelId}] Session ${sessionId} failed, trying without session-id`);
+    const fallbackArgs = args.filter(
+      (a, i) => a !== '--session-id' && args[i - 1] !== '--session-id',
+    );
+    return await runClaudeProcess(fallbackArgs, cwd, timeoutMs);
+  }
 }

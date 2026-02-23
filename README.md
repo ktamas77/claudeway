@@ -15,12 +15,12 @@ You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> resp
 ## How It Works
 
 1. You send a message in a configured Slack channel
-2. Claudeway spawns `claude -p --continue` in the mapped project folder
+2. Claudeway spawns `claude -p` in the mapped project folder with a deterministic session ID
 3. Claude Code reads your codebase, runs tools, and produces a response
 4. The response is posted back as a threaded reply in Slack
 5. Reactions show status: hourglass (processing), checkmark (done), X (error)
 
-Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc.
+Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + folder pair, so conversations persist across restarts.
 
 ## Self-Configuration
 
@@ -89,6 +89,56 @@ npm start
 For development with auto-reload:
 ```bash
 npm run dev
+```
+
+### 4. Run as a Background Service (macOS)
+
+Create a LaunchAgent to start Claudeway automatically on login:
+
+```bash
+cat > ~/Library/LaunchAgents/com.claudeway.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claudeway</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/path/to/claudeway/node_modules/.bin/tsx</string>
+        <string>/path/to/claudeway/src/index.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/claudeway</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/claudeway/claudeway.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/claudeway/claudeway.log</string>
+</dict>
+</plist>
+EOF
+```
+
+Then load it:
+```bash
+launchctl load ~/Library/LaunchAgents/com.claudeway.plist
+```
+
+Useful commands:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.claudeway.plist   # stop
+launchctl list | grep claudeway                                # status
+tail -f ~/dev/ktamas77/claudeway/claudeway.log                 # logs
 ```
 
 ## Channel Config Options
