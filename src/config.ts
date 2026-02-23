@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync } from 'fs';
 import { resolve } from 'path';
 
 export type ResponseMode = 'batch' | 'stream-update' | 'stream-native';
@@ -55,7 +55,20 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(config: Config): void {
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  const content = JSON.stringify(config, null, 2) + '\n';
+  const tmpPath = CONFIG_PATH + '.tmp';
+
+  // Write to temp file
+  writeFileSync(tmpPath, content, 'utf-8');
+
+  // Validate the temp file parses correctly and has required fields
+  const parsed = JSON.parse(readFileSync(tmpPath, 'utf-8')) as Config;
+  if (!parsed.channels || typeof parsed.channels !== 'object') {
+    throw new Error('saveConfig: validation failed — "channels" must be an object');
+  }
+
+  // Atomic rename: temp → original
+  renameSync(tmpPath, CONFIG_PATH);
 }
 
 export function getChannelConfig(config: Config, channelId: string): ChannelConfig | null {
