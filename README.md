@@ -169,6 +169,29 @@ Set `responseMode` in `defaults` or per channel:
 
 Streaming modes give real-time feedback for long responses instead of showing an hourglass for 30+ seconds. If the final response exceeds the file upload threshold (12KB), streaming modes automatically fall back to uploading a file.
 
+## Process Management
+
+Control running Claude CLI processes directly from Slack with magic commands. These bypass the message queue and execute immediately.
+
+| Command | Description |
+|---------|-------------|
+| `!ps` | List all active processes with channel name, runtime, prompt snippet, and queue depth |
+| `!kill` | Kill the process running in the current channel |
+| `!kill #channel` | Kill a process in another channel by name |
+| `!killall` | Kill all running processes |
+
+Example `!ps` output:
+```
+:gear: Active Processes (2/8)
+
+• #recycler — 18m 30s — "ok and don't forget to update your work log..."
+• #claudeway — 26m 39s — "i think we can kill the reminders service..."
+
+Queued: 5 messages (3 recycler, 2 claudeway)
+```
+
+Killed processes are handled gracefully — the error handler posts a message in the thread and the channel's queue continues draining.
+
 ## Troubleshooting
 
 **Messages queuing unexpectedly:** There's a global limit of 8 concurrent Claude CLI processes. If all slots are busy, new messages wait in queue until a slot frees up. Each channel also serializes its own messages (one at a time per channel).

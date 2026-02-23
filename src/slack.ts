@@ -4,8 +4,14 @@ import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { loadConfig, resolvedChannelConfig, type ResponseMode } from './config.js';
-import { runClaude, runClaudeStreaming } from './claude.js';
-import { enqueue, dequeue, getPendingForChannel, type QueuedMessage } from './queue.js';
+import {
+  runClaude,
+  runClaudeStreaming,
+  getActiveProcesses,
+  killProcess,
+  killAllProcesses,
+} from './claude.js';
+import { enqueue, dequeue, getPendingForChannel, getPending, type QueuedMessage } from './queue.js';
 
 interface SlackFile {
   id: string;
@@ -589,6 +595,185 @@ async function drainChannel(channelId: string, client: WebClient): Promise<void>
   }
 }
 
+// --- Magic command helpers ---
+
+function getChannelName(channelId: string): string {
+  try {
+    const config = loadConfig();
+    return config.channels[channelId]?.name ?? channelId;
+  } catch {
+    return channelId;
+  }
+}
+
+function findChannelIdByName(name: string): string | null {
+  try {
+    const config = loadConfig();
+    for (const [id, ch] of Object.entries(config.channels)) {
+      if (ch.name === name) return id;
+    }
+  } catch {
+    // Config error
+  }
+  return null;
+}
+
+function formatDuration(startedAt: Date): string {
+  const ms = Date.now() - startedAt.getTime();
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+async function handlePs(channelId: string, threadTs: string, client: WebClient): Promise<void> {
+  const processes = getActiveProcesses();
+  const pending = getPending();
+
+  let text: string;
+  if (processes.length === 0) {
+    text = ':gear: *No active processes*';
+  } else {
+    const lines = processes.map((p) => {
+      const name = getChannelName(p.channelId);
+      const duration = formatDuration(p.startedAt);
+      const snippet = p.message.length >= 80 ? p.message + '...' : p.message;
+      return `\u2022 #${name} \u2014 ${duration} \u2014 "${snippet}"`;
+    });
+    text = `:gear: *Active Processes (${processes.length}/${MAX_CONCURRENT_PROCESSES})*\n\n${lines.join('\n')}`;
+  }
+
+  if (pending.length > 0) {
+    const channelCounts = new Map<string, number>();
+    for (const msg of pending) {
+      const name = getChannelName(msg.channelId);
+      channelCounts.set(name, (channelCounts.get(name) ?? 0) + 1);
+    }
+    const breakdown = Array.from(channelCounts.entries())
+      .map(([name, count]) => `${count} ${name}`)
+      .join(', ');
+    text += `\n\nQueued: ${pending.length} message${pending.length !== 1 ? 's' : ''} (${breakdown})`;
+  }
+
+  await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text });
+}
+
+async function handleKill(
+  targetChannelId: string,
+  responseChannelId: string,
+  threadTs: string,
+  client: WebClient,
+): Promise<void> {
+  const processes = getActiveProcesses();
+  const target = processes.find((p) => p.channelId === targetChannelId);
+
+  if (!target) {
+    const name = getChannelName(targetChannelId);
+    await client.chat.postMessage({
+      channel: responseChannelId,
+      thread_ts: threadTs,
+      text: `:warning: No active process in #${name}`,
+    });
+    return;
+  }
+
+  const name = getChannelName(targetChannelId);
+  const duration = formatDuration(target.startedAt);
+  const killed = killProcess(targetChannelId);
+
+  if (killed) {
+    await client.chat.postMessage({
+      channel: responseChannelId,
+      thread_ts: threadTs,
+      text: `:stop_sign: Killed process in #${name} (was running ${duration})`,
+    });
+  } else {
+    await client.chat.postMessage({
+      channel: responseChannelId,
+      thread_ts: threadTs,
+      text: `:warning: Failed to kill process in #${name}`,
+    });
+  }
+}
+
+async function handleKillAll(
+  channelId: string,
+  threadTs: string,
+  client: WebClient,
+): Promise<void> {
+  const processes = getActiveProcesses();
+  if (processes.length === 0) {
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: ':stop_sign: No active processes to kill',
+    });
+    return;
+  }
+
+  const killed = killAllProcesses();
+  const names = killed.map((id) => `#${getChannelName(id)}`).join(', ');
+  await client.chat.postMessage({
+    channel: channelId,
+    thread_ts: threadTs,
+    text: `:stop_sign: Killed ${killed.length} process${killed.length !== 1 ? 'es' : ''}: ${names}`,
+  });
+}
+
+async function handleMagicCommand(
+  text: string,
+  channelId: string,
+  threadTs: string,
+  client: WebClient,
+): Promise<boolean> {
+  const trimmed = text.trim();
+
+  if (trimmed === '!ps') {
+    await handlePs(channelId, threadTs, client);
+    return true;
+  }
+
+  if (trimmed === '!killall') {
+    await handleKillAll(channelId, threadTs, client);
+    return true;
+  }
+
+  if (trimmed === '!kill') {
+    await handleKill(channelId, channelId, threadTs, client);
+    return true;
+  }
+
+  // !kill #channel, !kill channel, or !kill <#C123|channel>
+  const killMatch = trimmed.match(/^!kill\s+(?:<#(\w+)(?:\|[^>]*)?>|#?(\S+))$/);
+  if (killMatch) {
+    const slackChannelId = killMatch[1];
+    const targetName = killMatch[2];
+
+    let resolvedId: string | null = slackChannelId ?? null;
+    if (!resolvedId && targetName) {
+      resolvedId = findChannelIdByName(targetName);
+      if (!resolvedId) {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: `:warning: No configured channel named "${targetName}"`,
+        });
+        return true;
+      }
+    }
+
+    if (resolvedId) {
+      await handleKill(resolvedId, channelId, threadTs, client);
+    }
+    return true;
+  }
+
+  return false;
+}
+
 export function registerMessageHandler(app: App): void {
   app.message(async ({ message, client, context }) => {
     const msg = message as SlackMessage;
@@ -596,6 +781,14 @@ export function registerMessageHandler(app: App): void {
     // Ignore bot messages and message edits (allow file_share for image attachments)
     if (msg.bot_id) return;
     if (msg.subtype && msg.subtype !== 'file_share') return;
+
+    // Handle magic commands (!ps, !kill, !killall) — bypass queue and Claude processing
+    if (
+      msg.text &&
+      (await handleMagicCommand(msg.text, msg.channel, msg.thread_ts ?? msg.ts, client))
+    ) {
+      return;
+    }
 
     const hasText = !!msg.text;
     const hasImages = !!(

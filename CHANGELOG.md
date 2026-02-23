@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0] - 2026-02-23
+
+### Added
+- **Process management commands**: Control running Claude CLI processes directly from Slack
+  - `!ps` — list all active processes with channel name, runtime, prompt snippet, and queue stats
+  - `!kill` — kill the process running in the current channel
+  - `!kill #channel` — kill a process in another channel by name
+  - `!killall` — kill all running processes
+- **Process registry**: Internal tracking of all running Claude CLI processes, enabling external visibility and control
+- Magic commands bypass the message queue and concurrency limits — they execute immediately
+
 ## [0.4.1] - 2026-02-23
 
 ### Added

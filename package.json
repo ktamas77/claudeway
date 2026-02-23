@@ -1,6 +1,6 @@
 {
   "name": "claudeway",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Slack-to-Claude Code CLI gateway for solo developers",
   "type": "module",
   "scripts": {

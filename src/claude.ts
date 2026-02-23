@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { existsSync, unlinkSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
@@ -30,6 +30,39 @@ const CLAUDEWAY_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 // Absolute maximum runtime — safety net regardless of activity
 const ABSOLUTE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
 
+// --- Process registry for tracking and killing running Claude processes ---
+
+interface ActiveProcess {
+  proc: ChildProcess;
+  channelId: string;
+  sessionId: string;
+  startedAt: Date;
+  message: string;
+}
+
+const processRegistry = new Map<string, ActiveProcess>();
+
+export function getActiveProcesses(): Omit<ActiveProcess, 'proc'>[] {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  return Array.from(processRegistry.values()).map(({ proc, ...rest }) => rest);
+}
+
+export function killProcess(channelId: string): boolean {
+  const entry = processRegistry.get(channelId);
+  if (!entry) return false;
+  entry.proc.kill('SIGTERM');
+  return true;
+}
+
+export function killAllProcesses(): string[] {
+  const killed: string[] = [];
+  for (const [channelId, entry] of processRegistry) {
+    entry.proc.kill('SIGTERM');
+    killed.push(channelId);
+  }
+  return killed;
+}
+
 /**
  * Generate a deterministic session UUID from channel ID + folder path.
  * Same channel+folder always produces the same session ID, surviving restarts.
@@ -50,9 +83,24 @@ function spawnClaudeProcess(args: string[], cwd: string) {
   });
 }
 
-function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promise<ClaudeResult> {
+function runClaudeProcess(
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  channelId: string,
+  sessionId: string,
+  message: string,
+): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd);
+
+    processRegistry.set(channelId, {
+      proc,
+      channelId,
+      sessionId,
+      startedAt: new Date(),
+      message: message.substring(0, 80),
+    });
 
     let stdout = '';
     let stderr = '';
@@ -86,6 +134,7 @@ function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promi
     }, ABSOLUTE_TIMEOUT_MS);
 
     proc.on('close', (code) => {
+      processRegistry.delete(channelId);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
 
@@ -111,6 +160,7 @@ function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promi
     });
 
     proc.on('error', (err) => {
+      processRegistry.delete(channelId);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
       reject(new Error(`Failed to spawn claude: ${err.message}`));
@@ -123,9 +173,20 @@ function runClaudeStreamingProcess(
   cwd: string,
   timeoutMs: number,
   onTextDelta: (text: string) => void,
+  channelId: string,
+  registrySessionId: string,
+  message: string,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd);
+
+    processRegistry.set(channelId, {
+      proc,
+      channelId,
+      sessionId: registrySessionId,
+      startedAt: new Date(),
+      message: message.substring(0, 80),
+    });
 
     let stderr = '';
     let fullText = '';
@@ -199,6 +260,7 @@ function runClaudeStreamingProcess(
     }, ABSOLUTE_TIMEOUT_MS);
 
     proc.on('close', (code) => {
+      processRegistry.delete(channelId);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
       // Process any remaining buffered line
@@ -219,6 +281,7 @@ function runClaudeStreamingProcess(
     });
 
     proc.on('error', (err) => {
+      processRegistry.delete(channelId);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
       reject(new Error(`Failed to spawn claude: ${err.message}`));
@@ -315,7 +378,14 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   console.log(`[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
 
   try {
-    return await runClaudeProcess(args, cwd, options.timeoutMs);
+    return await runClaudeProcess(
+      args,
+      cwd,
+      options.timeoutMs,
+      options.channelId,
+      sessionId,
+      options.message,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('already in use')) {
@@ -323,7 +393,14 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
         `[${options.channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
       );
       clearSessionArtifacts(sessionId, cwd);
-      return await runClaudeProcess(makeFreshArgs(args, sessionId), cwd, options.timeoutMs);
+      return await runClaudeProcess(
+        makeFreshArgs(args, sessionId),
+        cwd,
+        options.timeoutMs,
+        options.channelId,
+        sessionId,
+        options.message,
+      );
     }
     throw err;
   }
@@ -337,7 +414,15 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
   );
 
   try {
-    return await runClaudeStreamingProcess(args, cwd, options.timeoutMs, options.onTextDelta);
+    return await runClaudeStreamingProcess(
+      args,
+      cwd,
+      options.timeoutMs,
+      options.onTextDelta,
+      options.channelId,
+      sessionId,
+      options.message,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('already in use')) {
@@ -350,6 +435,9 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         cwd,
         options.timeoutMs,
         options.onTextDelta,
+        options.channelId,
+        sessionId,
+        options.message,
       );
     }
     throw err;
