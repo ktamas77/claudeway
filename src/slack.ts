@@ -17,6 +17,35 @@ interface SlackMessage {
 const MAX_MESSAGE_LENGTH = 3900;
 const FILE_THRESHOLD = 12000;
 
+/**
+ * Convert standard Markdown to Slack mrkdwn.
+ * Claude Code outputs standard Markdown by default; this ensures it renders
+ * correctly in Slack even if the system prompt hint is ignored.
+ */
+function markdownToSlackMrkdwn(text: string): string {
+  let result = text;
+
+  // Convert Markdown links [text](url) → <url|text>
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
+
+  // Convert headings (### text → *text*) — Slack has no heading syntax
+  result = result.replace(/^#{1,6}\s+(.+)$/gm, '*$1*');
+
+  // Convert **bold** → *bold* (must come before single-asterisk handling)
+  result = result.replace(/\*\*(.+?)\*\*/g, '*$1*');
+
+  // Convert ~~strikethrough~~ → ~strikethrough~
+  result = result.replace(/~~(.+?)~~/g, '~$1~');
+
+  // Convert horizontal rules (---, ***, ___) → ———
+  result = result.replace(/^(?:[-*_]){3,}\s*$/gm, '———');
+
+  // Strip language tags from fenced code blocks (```js → ```)
+  result = result.replace(/```\w+\n/g, '```\n');
+
+  return result;
+}
+
 // Per-channel processing lock — one message at a time per channel
 const channelBusy = new Set<string>();
 
@@ -55,7 +84,10 @@ async function sendResponse(
     return;
   }
 
-  const chunks = splitMessage(text);
+  // Convert standard Markdown → Slack mrkdwn before sending
+  const formatted = markdownToSlackMrkdwn(text);
+
+  const chunks = splitMessage(formatted);
   for (const chunk of chunks) {
     await client.chat.postMessage({
       channel,
