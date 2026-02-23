@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0] - 2026-02-23
+
+### Changed
+- **Improved Markdown-to-mrkdwn conversion**: `markdownToSlackMrkdwn()` is now code-block-aware — conversions only run on non-code segments so fenced code content is never mangled
+- **Bullet point support**: `- item` and `* item` lines are converted to `• item` (Slack has no native bullet syntax)
+- **HTML entity escaping**: bare `<` and `&` in plain text are escaped to `&lt;` / `&amp;` before Slack processes the message, preventing accidental mrkdwn token interpretation; Markdown link tokens (`<url|text>`) are created after escaping and remain correct
+
 ## [0.9.0] - 2026-02-23
 
 ### Changed

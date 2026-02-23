@@ -93,6 +93,58 @@ describe('markdownToSlackMrkdwn', () => {
       '*Summary*\n*key point* — see <https://example.com|docs>\n```\nconsole.log(1)\n```';
     expect(markdownToSlackMrkdwn(input)).toBe(expected);
   });
+
+  describe('bullet points', () => {
+    it('converts - item to • item', () => {
+      expect(markdownToSlackMrkdwn('- first item')).toBe('• first item');
+    });
+
+    it('converts * item to • item', () => {
+      expect(markdownToSlackMrkdwn('* first item')).toBe('• first item');
+    });
+
+    it('converts multiple bullet lines', () => {
+      expect(markdownToSlackMrkdwn('- one\n- two\n- three')).toBe('• one\n• two\n• three');
+    });
+
+    it('does not convert bullets inside code blocks', () => {
+      expect(markdownToSlackMrkdwn('```\n- not a bullet\n```')).toBe('```\n- not a bullet\n```');
+    });
+
+    it('does not convert - mid-word', () => {
+      expect(markdownToSlackMrkdwn('well-known')).toBe('well-known');
+    });
+  });
+
+  describe('HTML entity escaping', () => {
+    it('escapes < in plain text', () => {
+      expect(markdownToSlackMrkdwn('value < 0')).toBe('value &lt; 0');
+    });
+
+    it('escapes & in plain text', () => {
+      expect(markdownToSlackMrkdwn('AT&T')).toBe('AT&amp;T');
+    });
+
+    it('does not escape < inside code blocks', () => {
+      expect(markdownToSlackMrkdwn('```\nx < y\n```')).toBe('```\nx < y\n```');
+    });
+
+    it('does not escape & inside code blocks', () => {
+      expect(markdownToSlackMrkdwn('```\na && b\n```')).toBe('```\na && b\n```');
+    });
+
+    it('still converts Markdown links after escaping (links create Slack tokens)', () => {
+      expect(markdownToSlackMrkdwn('[visit](https://example.com)')).toBe(
+        '<https://example.com|visit>',
+      );
+    });
+
+    it('escapes bare < in text but not in converted link tokens', () => {
+      expect(markdownToSlackMrkdwn('x < y and [visit](https://example.com)')).toBe(
+        'x &lt; y and <https://example.com|visit>',
+      );
+    });
+  });
 });
 
 describe('splitMessage', () => {

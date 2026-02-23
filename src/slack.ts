@@ -87,9 +87,42 @@ const FILE_THRESHOLD = 12000;
  * Convert standard Markdown to Slack mrkdwn.
  * Claude Code outputs standard Markdown by default; this ensures it renders
  * correctly in Slack even if the system prompt hint is ignored.
+ *
+ * Code blocks are extracted first and only have their language tag stripped —
+ * all other conversions run only on non-code segments.
  */
 export function markdownToSlackMrkdwn(text: string): string {
+  // Split on fenced code blocks so conversions don't mangle code content.
+  const parts: string[] = [];
+  const codeBlockRe = /```\w*\n[\s\S]*?```/g;
+  let lastIndex = 0;
+
+  for (const match of text.matchAll(codeBlockRe)) {
+    if (match.index > lastIndex) {
+      parts.push(convertMarkdownText(text.slice(lastIndex, match.index)));
+    }
+    // Code blocks: only strip language tag, leave content untouched
+    parts.push(match[0].replace(/^```\w+\n/, '```\n'));
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    parts.push(convertMarkdownText(text.slice(lastIndex)));
+  }
+
+  return parts.join('');
+}
+
+/**
+ * Apply Markdown-to-mrkdwn conversions to a non-code-block text segment.
+ */
+function convertMarkdownText(text: string): string {
   let result = text;
+
+  // Escape & and < before creating Slack tokens so Claude's literal text
+  // (e.g. "x < y" or "AT&T") isn't misparsed by Slack as tokens/entities.
+  // Link conversion below intentionally introduces < chars for Slack link tokens.
+  result = result.replace(/&/g, '&amp;');
+  result = result.replace(/</g, '&lt;');
 
   // Convert Markdown links [text](url) → <url|text>
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
@@ -106,8 +139,8 @@ export function markdownToSlackMrkdwn(text: string): string {
   // Convert horizontal rules (---, ***, ___) → ———
   result = result.replace(/^(?:[-*_]){3,}\s*$/gm, '———');
 
-  // Strip language tags from fenced code blocks (```js → ```)
-  result = result.replace(/```\w+\n/g, '```\n');
+  // Convert Markdown bullet points (- item / * item) → • item
+  result = result.replace(/^[*-] (.+)$/gm, '• $1');
 
   return result;
 }
