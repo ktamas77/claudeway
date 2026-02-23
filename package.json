@@ -1,6 +1,6 @@
 {
   "name": "claudeway",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "description": "Slack-to-Claude Code CLI gateway for solo developers",
   "type": "module",
   "scripts": {
@@ -11,6 +11,9 @@
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
     "typecheck": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "test:watch": "node --experimental-vm-modules node_modules/.bin/jest --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/.bin/jest --coverage",
     "prepare": "husky"
   },
   "keywords": [
@@ -29,13 +32,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/jest": "^30.0.0",
     "@types/node": "^25.3.0",
     "@types/uuid": "^10.0.0",
     "eslint": "^10.0.1",
     "eslint-config-prettier": "^10.1.8",
     "husky": "^9.1.7",
+    "jest": "^30.2.0",
     "lint-staged": "^16.2.7",
     "prettier": "^3.8.1",
+    "ts-jest": "^29.4.6",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.0"

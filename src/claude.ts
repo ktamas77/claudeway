@@ -4,6 +4,9 @@ import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
 import { getConfigPath } from './config.js';
 
+// Re-export ProcessMode for consumers that only import from claude.ts
+export type { ProcessMode } from './config.js';
+
 export interface ClaudeOptions {
   message: string;
   cwd: string;
@@ -42,21 +45,68 @@ interface ActiveProcess {
 
 const processRegistry = new Map<string, ActiveProcess>();
 
-export function getActiveProcesses(): Omit<ActiveProcess, 'proc'>[] {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  return Array.from(processRegistry.values()).map(({ proc, ...rest }) => rest);
+// --- Persistent process registry ---
+
+interface PersistentProcessEntry {
+  proc: ChildProcess;
+  channelId: string;
+  sessionId: string;
+  startedAt: Date;
+  lastMessage: string;
+  idleTimer: ReturnType<typeof setTimeout>;
+  lineBuffer: string;
+  currentTurn: {
+    resolve: (r: ClaudeResult) => void;
+    reject: (e: Error) => void;
+    onTextDelta?: (text: string) => void;
+    fullText: string;
+    sessionId: string | null;
+    cost: number | null;
+  } | null;
+}
+
+const persistentRegistry = new Map<string, PersistentProcessEntry>();
+
+export function getActiveProcesses(): (
+  | Omit<ActiveProcess, 'proc'>
+  | { channelId: string; sessionId: string; startedAt: Date; message: string }
+)[] {
+  const oneshot = Array.from(processRegistry.values()).map(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    ({ proc, ...rest }) => rest,
+  );
+  const persistent = Array.from(persistentRegistry.values()).map((entry) => ({
+    channelId: entry.channelId,
+    sessionId: entry.sessionId,
+    startedAt: entry.startedAt,
+    message: entry.currentTurn ? entry.lastMessage : `${entry.lastMessage} (idle)`,
+  }));
+  return [...oneshot, ...persistent];
 }
 
 export function killProcess(channelId: string): boolean {
   const entry = processRegistry.get(channelId);
-  if (!entry) return false;
-  entry.proc.kill('SIGTERM');
-  return true;
+  if (entry) {
+    entry.proc.kill('SIGTERM');
+    return true;
+  }
+  const persistentEntry = persistentRegistry.get(channelId);
+  if (persistentEntry) {
+    clearTimeout(persistentEntry.idleTimer);
+    persistentEntry.proc.kill('SIGTERM');
+    return true;
+  }
+  return false;
 }
 
 export function killAllProcesses(): string[] {
   const killed: string[] = [];
   for (const [channelId, entry] of processRegistry) {
+    entry.proc.kill('SIGTERM');
+    killed.push(channelId);
+  }
+  for (const [channelId, entry] of persistentRegistry) {
+    clearTimeout(entry.idleTimer);
     entry.proc.kill('SIGTERM');
     killed.push(channelId);
   }
@@ -69,6 +119,54 @@ export function killAllProcesses(): string[] {
  */
 export function deriveSessionId(channelId: string, folder: string): string {
   return uuidv5(`${channelId}:${folder}`, CLAUDEWAY_NAMESPACE);
+}
+
+// --- Stream-json line parser (pure, exported for testing) ---
+
+export type StreamLineEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'result'; text: string; sessionId: string | null; cost: number | null }
+  | { type: 'user_receipt' }
+  | null;
+
+/**
+ * Parse one NDJSON line from Claude CLI --output-format stream-json output.
+ * Returns a typed event or null (unrecognised / whitespace / invalid JSON).
+ */
+export function parseStreamLine(line: string): StreamLineEvent {
+  if (!line.trim()) return null;
+  try {
+    const obj = JSON.parse(line);
+
+    // Text delta — {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
+    if (
+      obj.type === 'stream_event' &&
+      obj.event?.type === 'content_block_delta' &&
+      obj.event.delta?.type === 'text_delta' &&
+      obj.event.delta.text
+    ) {
+      return { type: 'text_delta', text: obj.event.delta.text };
+    }
+
+    // Result event
+    if (obj.type === 'result') {
+      return {
+        type: 'result',
+        text: obj.result ?? '',
+        sessionId: obj.session_id ?? null,
+        cost: obj.cost_usd ?? obj.total_cost_usd ?? null,
+      };
+    }
+
+    // User message receipt (persistent mode --replay-user-messages)
+    if (obj.type === 'user') {
+      return { type: 'user_receipt' };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function spawnClaudeProcess(args: string[], cwd: string) {
@@ -195,33 +293,15 @@ function runClaudeStreamingProcess(
     let lineBuffer = '';
 
     function processLine(line: string) {
-      if (!line.trim()) return;
-      try {
-        const obj = JSON.parse(line);
-
-        // Text delta — stream to callback
-        // Events are wrapped: {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
-        if (
-          obj.type === 'stream_event' &&
-          obj.event?.type === 'content_block_delta' &&
-          obj.event.delta?.type === 'text_delta' &&
-          obj.event.delta.text
-        ) {
-          fullText += obj.event.delta.text;
-          onTextDelta(obj.event.delta.text);
-          return;
-        }
-
-        // Result event — extract metadata
-        if (obj.type === 'result') {
-          sessionId = obj.session_id ?? sessionId;
-          cost = obj.cost_usd ?? obj.total_cost_usd ?? cost;
-          if (obj.result) {
-            fullText = obj.result;
-          }
-        }
-      } catch {
-        // Not valid JSON — ignore partial lines
+      const event = parseStreamLine(line);
+      if (!event) return;
+      if (event.type === 'text_delta') {
+        fullText += event.text;
+        onTextDelta(event.text);
+      } else if (event.type === 'result') {
+        sessionId = event.sessionId ?? sessionId;
+        cost = event.cost ?? cost;
+        if (event.text) fullText = event.text;
       }
     }
 
@@ -293,7 +373,7 @@ function runClaudeStreamingProcess(
  * Resolve paths to all artifacts Claude CLI creates for a session.
  * Claude encodes folder paths by replacing / with - (keeping the leading dash).
  */
-function sessionArtifactPaths(sessionId: string, cwd: string) {
+export function sessionArtifactPaths(sessionId: string, cwd: string) {
   const home = process.env.HOME ?? `/Users/${process.env.USER ?? ''}`;
   const encodedPath = cwd.replace(/\//g, '-');
   return {
@@ -442,4 +522,220 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
     }
     throw err;
   }
+}
+
+// --- Persistent process mode ---
+
+function buildPersistentClaudeArgs(options: ClaudeOptions): {
+  args: string[];
+  sessionId: string;
+  cwd: string;
+  resuming: boolean;
+} {
+  const { cwd, model, systemPrompt, channelId } = options;
+
+  const configPath = getConfigPath();
+  const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
+  const sessionId = deriveSessionId(channelId, cwd);
+
+  const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
+  const resuming = existsSync(sessionFile);
+
+  const args = [
+    '-p',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--input-format',
+    'stream-json',
+    '--replay-user-messages',
+    '--model',
+    model,
+    ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
+    '--append-system-prompt',
+    prompt,
+    '--dangerously-skip-permissions',
+  ];
+
+  const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
+  if (existsSync(mcpConfigPath)) {
+    args.push('--mcp-config', mcpConfigPath);
+  }
+
+  return { args, sessionId, cwd, resuming };
+}
+
+function createPersistentProcess(
+  options: ClaudeOptions,
+  timeoutMs: number,
+): PersistentProcessEntry {
+  const { args, sessionId, cwd, resuming } = buildPersistentClaudeArgs(options);
+
+  console.log(
+    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} persistent session ${sessionId}`,
+  );
+
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
+
+  const proc = spawn('claude', args, {
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env,
+  });
+
+  const entry: PersistentProcessEntry = {
+    proc,
+    channelId: options.channelId,
+    sessionId,
+    startedAt: new Date(),
+    lastMessage: '',
+    idleTimer: setTimeout(() => {}, 0), // placeholder; reset immediately below
+    lineBuffer: '',
+    currentTurn: null,
+  };
+
+  function resetIdleTimer() {
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = setTimeout(() => {
+      console.log(`[${options.channelId}] Persistent process idle timeout — killing`);
+      proc.kill('SIGTERM');
+    }, timeoutMs);
+  }
+
+  // Start idle timer
+  resetIdleTimer();
+
+  proc.stdout.on('data', (data: Buffer) => {
+    resetIdleTimer();
+    entry.lineBuffer += data.toString();
+    const lines = entry.lineBuffer.split('\n');
+    entry.lineBuffer = lines.pop() ?? '';
+    for (const line of lines) {
+      processPersistentLine(entry, line);
+    }
+  });
+
+  proc.stderr.on('data', (data: Buffer) => {
+    resetIdleTimer();
+    console.error(`[${options.channelId}] Persistent stderr: ${data.toString().trim()}`);
+  });
+
+  proc.on('close', (code) => {
+    clearTimeout(entry.idleTimer);
+    persistentRegistry.delete(options.channelId);
+
+    // Process remaining buffered line
+    if (entry.lineBuffer.trim()) {
+      processPersistentLine(entry, entry.lineBuffer);
+      entry.lineBuffer = '';
+    }
+
+    if (entry.currentTurn) {
+      const turn = entry.currentTurn;
+      entry.currentTurn = null;
+      if (code !== 0) {
+        turn.reject(new Error(`Persistent Claude process exited with code ${code}`));
+      } else {
+        // Process ended cleanly mid-turn — resolve with what we have
+        turn.resolve({
+          response: turn.fullText,
+          sessionId: turn.sessionId,
+          cost: turn.cost,
+        });
+      }
+    }
+  });
+
+  proc.on('error', (err) => {
+    clearTimeout(entry.idleTimer);
+    persistentRegistry.delete(options.channelId);
+    if (entry.currentTurn) {
+      const turn = entry.currentTurn;
+      entry.currentTurn = null;
+      turn.reject(new Error(`Failed to spawn persistent claude: ${err.message}`));
+    }
+  });
+
+  persistentRegistry.set(options.channelId, entry);
+  return entry;
+}
+
+function processPersistentLine(entry: PersistentProcessEntry, line: string): void {
+  const event = parseStreamLine(line);
+  if (!event) return;
+
+  if (event.type === 'user_receipt') {
+    console.log(`[${entry.channelId}] Persistent: user message receipt`);
+    return;
+  }
+
+  if (event.type === 'text_delta' && entry.currentTurn) {
+    entry.currentTurn.fullText += event.text;
+    entry.currentTurn.onTextDelta?.(event.text);
+    return;
+  }
+
+  if (event.type === 'result' && entry.currentTurn) {
+    const turn = entry.currentTurn;
+    entry.currentTurn = null;
+    turn.resolve({
+      response: event.text || turn.fullText,
+      sessionId: event.sessionId ?? turn.sessionId,
+      cost: event.cost ?? turn.cost,
+    });
+  }
+}
+
+export async function runClaudePersistentStreaming(
+  options: ClaudeStreamingOptions,
+): Promise<ClaudeResult> {
+  const { channelId, message, timeoutMs, imagePaths, onTextDelta } = options;
+
+  let entry = persistentRegistry.get(channelId);
+
+  // Spawn or re-spawn if process is gone
+  if (!entry || !entry.proc.pid || entry.proc.killed) {
+    entry = createPersistentProcess(options, timeoutMs);
+  }
+
+  entry.lastMessage = message.substring(0, 80);
+
+  // Build message content (include image refs if any)
+  let content = message;
+  if (imagePaths && imagePaths.length > 0) {
+    const imageRefs = imagePaths.join('\n');
+    content =
+      message + '\n\n[Attached image files — use your Read tool to view them]\n' + imageRefs;
+  }
+
+  // Write the user message to stdin as NDJSON
+  const inputLine = JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';
+
+  return new Promise((resolve, reject) => {
+    if (!entry) {
+      reject(new Error('Persistent process entry missing'));
+      return;
+    }
+
+    entry.currentTurn = {
+      resolve,
+      reject,
+      onTextDelta,
+      fullText: '',
+      sessionId: entry.sessionId,
+      cost: null,
+    };
+
+    entry.proc.stdin!.write(inputLine, (err) => {
+      if (err) {
+        if (entry!.currentTurn) {
+          entry!.currentTurn = null;
+        }
+        reject(new Error(`Failed to write to persistent claude stdin: ${err.message}`));
+      }
+    });
+  });
 }

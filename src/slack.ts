@@ -7,6 +7,7 @@ import { loadConfig, resolvedChannelConfig, type ResponseMode } from './config.j
 import {
   runClaude,
   runClaudeStreaming,
+  runClaudePersistentStreaming,
   getActiveProcesses,
   killProcess,
   killAllProcesses,
@@ -85,7 +86,7 @@ const FILE_THRESHOLD = 12000;
  * Claude Code outputs standard Markdown by default; this ensures it renders
  * correctly in Slack even if the system prompt hint is ignored.
  */
-function markdownToSlackMrkdwn(text: string): string {
+export function markdownToSlackMrkdwn(text: string): string {
   let result = text;
 
   // Convert Markdown links [text](url) → <url|text>
@@ -296,7 +297,7 @@ function releaseProcessSlot(): void {
   if (next) next();
 }
 
-function splitMessage(text: string): string[] {
+export function splitMessage(text: string): string[] {
   const chunks: string[] = [];
   let remaining = text;
   while (remaining.length > 0) {
@@ -378,8 +379,8 @@ async function processBatch(
       imagePaths: queued.imagePaths,
     });
 
-    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
     await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
     await sendResponse(client, queued.channelId, queued.threadTs, result.response);
 
@@ -412,8 +413,8 @@ async function processStreamUpdate(
 
     await responder.finish();
 
-    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
     await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
     // If final response exceeds file threshold, upload as file and delete the streamed message
     const finalText = result.response || responder.getFullText();
@@ -490,8 +491,8 @@ async function processStreamNative(
 
     await responder.finish();
 
-    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
     await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
     // Native streaming handles display automatically; fall back to file upload for huge responses
     const finalText = result.response || responder.getFullText();
@@ -510,6 +511,139 @@ async function processStreamNative(
     }
   } finally {
     if (queued.imagePaths) cleanupImages(queued.imagePaths);
+  }
+}
+
+async function processPersistent(
+  queued: QueuedMessage,
+  client: WebClient,
+  channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+): Promise<void> {
+  const mode = channelConfig.responseMode;
+
+  if (mode === 'batch') {
+    // No streaming output needed — use a no-op delta handler
+    try {
+      const result = await runClaudePersistentStreaming({
+        message: queued.text,
+        cwd: channelConfig.folder,
+        model: channelConfig.model,
+        systemPrompt: channelConfig.systemPrompt,
+        timeoutMs: channelConfig.timeoutMs,
+        channelId: queued.channelId,
+        imagePaths: queued.imagePaths,
+        onTextDelta: () => {},
+      });
+
+      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+      await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+      await sendResponse(client, queued.channelId, queued.threadTs, result.response);
+
+      if (result.cost !== null) {
+        console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+      }
+    } finally {
+      if (queued.imagePaths) cleanupImages(queued.imagePaths);
+    }
+  } else if (mode === 'stream-update') {
+    try {
+      const responder = new StreamingResponder(client, queued.channelId, queued.threadTs);
+
+      const result = await runClaudePersistentStreaming({
+        message: queued.text,
+        cwd: channelConfig.folder,
+        model: channelConfig.model,
+        systemPrompt: channelConfig.systemPrompt,
+        timeoutMs: channelConfig.timeoutMs,
+        channelId: queued.channelId,
+        imagePaths: queued.imagePaths,
+        onTextDelta: (text) => responder.onTextDelta(text),
+      });
+
+      await responder.finish();
+      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+      await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+
+      const finalText = result.response || responder.getFullText();
+      if (finalText.length > FILE_THRESHOLD) {
+        const msgTs = responder.getMessageTs();
+        if (msgTs) {
+          try {
+            await client.chat.delete({ channel: queued.channelId, ts: msgTs });
+          } catch {
+            // Best effort
+          }
+        }
+        await client.files.uploadV2({
+          channel_id: queued.channelId,
+          thread_ts: queued.threadTs,
+          content: finalText,
+          filename: 'response.md',
+          title: 'Response',
+        });
+      } else if (finalText.length > MAX_MESSAGE_LENGTH) {
+        const formatted = markdownToSlackMrkdwn(finalText);
+        const chunks = splitMessage(formatted);
+        const msgTs = responder.getMessageTs();
+        if (msgTs && chunks.length > 0) {
+          try {
+            await client.chat.update({ channel: queued.channelId, ts: msgTs, text: chunks[0] });
+          } catch {
+            // Fall through
+          }
+          for (let i = 1; i < chunks.length; i++) {
+            await client.chat.postMessage({
+              channel: queued.channelId,
+              thread_ts: queued.threadTs,
+              text: chunks[i],
+            });
+          }
+        }
+      }
+
+      if (result.cost !== null) {
+        console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+      }
+    } finally {
+      if (queued.imagePaths) cleanupImages(queued.imagePaths);
+    }
+  } else {
+    // stream-native
+    try {
+      const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs);
+
+      const result = await runClaudePersistentStreaming({
+        message: queued.text,
+        cwd: channelConfig.folder,
+        model: channelConfig.model,
+        systemPrompt: channelConfig.systemPrompt,
+        timeoutMs: channelConfig.timeoutMs,
+        channelId: queued.channelId,
+        imagePaths: queued.imagePaths,
+        onTextDelta: (text) => responder.onTextDelta(text),
+      });
+
+      await responder.finish();
+      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+      await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+
+      const finalText = result.response || responder.getFullText();
+      if (finalText.length > FILE_THRESHOLD) {
+        await client.files.uploadV2({
+          channel_id: queued.channelId,
+          thread_ts: queued.threadTs,
+          content: finalText,
+          filename: 'response.md',
+          title: 'Response',
+        });
+      }
+
+      if (result.cost !== null) {
+        console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+      }
+    } finally {
+      if (queued.imagePaths) cleanupImages(queued.imagePaths);
+    }
   }
 }
 
@@ -543,6 +677,7 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
   }
 
   await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand');
+  await safeReact(client, queued.channelId, queued.ts, 'inbox_tray', 'remove');
 
   const mode = channelConfig.responseMode;
 
@@ -554,13 +689,20 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
   }
   await acquireProcessSlot();
 
-  console.log(`[${channelConfig.name}] Processing (${mode}): ${queued.text.substring(0, 80)}...`);
+  const processMode = channelConfig.processMode;
+  console.log(
+    `[${channelConfig.name}] Processing (${processMode}/${mode}): ${queued.text.substring(0, 80)}...`,
+  );
 
   try {
-    await MODE_PROCESSORS[mode](queued, client, channelConfig);
+    if (processMode === 'persistent') {
+      await processPersistent(queued, client, channelConfig);
+    } else {
+      await MODE_PROCESSORS[mode](queued, client, channelConfig);
+    }
   } catch (err) {
-    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
     await safeReact(client, queued.channelId, queued.ts, 'x');
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error(`[${channelConfig.name}] Error:`, errorMsg);
@@ -618,7 +760,7 @@ function findChannelIdByName(name: string): string | null {
   return null;
 }
 
-function formatDuration(startedAt: Date): string {
+export function formatDuration(startedAt: Date): string {
   const ms = Date.now() - startedAt.getTime();
   const totalSeconds = Math.floor(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
@@ -826,6 +968,9 @@ export function registerMessageHandler(app: App): void {
       queuedAt: new Date().toISOString(),
       ...(imagePaths.length > 0 ? { imagePaths } : {}),
     });
+
+    // Acknowledge receipt immediately
+    await safeReact(client, msg.channel, msg.ts, 'inbox_tray');
 
     if (channelBusy.has(msg.channel)) {
       console.log(`[${msg.channel}] Busy, message queued`);

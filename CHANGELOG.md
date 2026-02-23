@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.7.0] - 2026-02-23
+
+### Added
+- **Unit test suite**: 67 tests across 4 files using Jest + ts-jest
+  - `ndjson.test.ts` — NDJSON stream-json line parsing (text deltas, result events, user receipts, edge cases)
+  - `slack.test.ts` — Markdown-to-mrkdwn conversion, message splitting, duration formatting
+  - `config.test.ts` — Config resolution and channel lookups including `processMode`
+  - `claude.test.ts` — Session ID derivation (with regression guard), session artifact path encoding
+- **Queued reaction**: Bot now reacts with `:inbox_tray:` immediately on message receipt, before any processing begins — provides instant acknowledgement even when a channel is busy
+- Tests run automatically on every commit via pre-commit hook (Husky)
+
+### Changed
+- Reaction transitions always add the new emoji before removing the old one to prevent visual jumps in Slack
+- Refactored internal NDJSON line parsing into a module-level `parseStreamLine()` function shared by both streaming and persistent process paths
+
+## [0.6.0] - 2026-02-23
+
+### Added
+- **Persistent process mode**: `processMode: 'persistent'` config option keeps a long-lived Claude CLI
+  process per channel. Messages piped via stdin instead of spawning a new process each time —
+  eliminates ~2-3s startup overhead and reduces repeated context-loading token costs.
+- `processMode` configurable in `defaults` and per channel. Default is `'oneshot'` (fully backwards compatible).
+- Persistent processes idle-kill after `timeoutMs` ms of inactivity and auto-respawn on next message.
+- All three `responseMode` options (`batch`, `stream-update`, `stream-native`) work with `processMode: persistent`.
+- `!ps` and `!kill`/`!killall` commands now include persistent processes in their output/control.
+
 ## [0.5.0] - 2026-02-23
 
 ### Added

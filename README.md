@@ -15,10 +15,10 @@ You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> resp
 ## How It Works
 
 1. You send a message (with optional image attachments) in a configured Slack channel
-2. Claudeway downloads any attached images to a temp directory and spawns `claude -p` in the mapped project folder, resuming the existing session if one exists
+2. Claudeway downloads any attached images to a temp directory, then either spawns a fresh `claude -p` process or pipes the message into a long-lived persistent process — depending on `processMode`
 3. Claude Code reads your codebase, analyzes any attached images, runs tools, and produces a response
 4. The response is posted back as a threaded reply in Slack
-5. Reactions show status: hourglass (processing), checkmark (done), X (error)
+5. Reactions show status: `📥` (queued/received), ⏳ (processing), ✅ (done), ❌ (error)
 6. Temp image files are cleaned up after processing
 
 Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + folder pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.
@@ -79,6 +79,7 @@ Create `config.json`:
     "model": "opus",
     "systemPrompt": "Format all responses using Slack mrkdwn syntax (NOT standard Markdown). Key rules: *bold* (single asterisk), _italic_ (underscore), ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag), > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes. Keep responses concise. You have access to the Claudeway config at CONFIG_PATH which you can read and edit when asked to add, remove, or update channel mappings.",
     "timeoutMs": 1800000,
+    "processMode": "oneshot",
     "responseMode": "batch"
   }
 }
@@ -156,6 +157,18 @@ Set `systemChannel` to the ID of one of your configured channels. Claudeway will
 | `systemPrompt` | Custom system prompt | from defaults |
 | `timeoutMs` | Idle timeout in ms (resets on activity) | 1800000 (30 min) |
 | `responseMode` | How responses are delivered (see below) | from defaults |
+| `processMode` | How the Claude CLI process is managed (see below) | from defaults |
+
+### Process Modes
+
+Set `processMode` in `defaults` or per channel:
+
+| Mode | Description |
+|------|-------------|
+| `oneshot` | Spawn a fresh `claude -p` process for every message. Default, simple, fully isolated. ~2-3s startup per message. |
+| `persistent` | Keep one long-lived `claude -p` process per channel. Messages piped via stdin. Eliminates startup overhead and avoids re-loading session context on each turn. Idle-kills after `timeoutMs` of inactivity and auto-respawns on next message. |
+
+`processMode` and `responseMode` are fully independent — any combination works.
 
 ### Response Modes
 
@@ -191,6 +204,21 @@ Queued: 5 messages (3 recycler, 2 claudeway)
 ```
 
 Killed processes are handled gracefully — the error handler posts a message in the thread and the channel's queue continues draining.
+
+## Development
+
+```bash
+npm start          # Run with tsx
+npm run dev        # Run with tsx watch (auto-reload)
+npm run build      # TypeScript compile
+npm run typecheck  # Type check only
+npm run lint       # ESLint
+npm run format     # Prettier
+npm test           # Run unit tests
+npm run test:watch # Watch mode
+```
+
+Unit tests cover the pure-function layer: NDJSON stream-json line parsing (the Claude CLI wire format), Slack mrkdwn conversion, message splitting, config resolution, session ID derivation, and path encoding. Tests run automatically on every commit via the pre-commit hook.
 
 ## Troubleshooting
 

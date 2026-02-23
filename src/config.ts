@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, renameSync } from 'fs';
 import { resolve } from 'path';
 
 export type ResponseMode = 'batch' | 'stream-update' | 'stream-native';
+export type ProcessMode = 'oneshot' | 'persistent';
 
 export interface ChannelConfig {
   name: string;
@@ -10,6 +11,7 @@ export interface ChannelConfig {
   systemPrompt?: string;
   timeoutMs?: number;
   responseMode?: ResponseMode;
+  processMode?: ProcessMode;
 }
 
 export interface Defaults {
@@ -17,6 +19,7 @@ export interface Defaults {
   systemPrompt: string;
   timeoutMs: number;
   responseMode: ResponseMode;
+  processMode?: ProcessMode;
 }
 
 export interface Config {
@@ -49,6 +52,9 @@ export function loadConfig(): Config {
   }
   if (!config.defaults.responseMode) {
     config.defaults.responseMode = 'batch';
+  }
+  if (!config.defaults.processMode) {
+    config.defaults.processMode = 'oneshot';
   }
 
   return config;
@@ -84,6 +90,7 @@ export function resolvedChannelConfig(
       systemPrompt: string;
       timeoutMs: number;
       responseMode: ResponseMode;
+      processMode: ProcessMode;
     })
   | null {
   const ch = config.channels[channelId];
@@ -94,5 +101,6 @@ export function resolvedChannelConfig(
     systemPrompt: ch.systemPrompt ?? config.defaults.systemPrompt,
     timeoutMs: ch.timeoutMs ?? config.defaults.timeoutMs,
     responseMode: ch.responseMode ?? config.defaults.responseMode,
+    processMode: ch.processMode ?? config.defaults.processMode ?? 'oneshot',
   };
 }
