@@ -15,12 +15,12 @@ You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> resp
 ## How It Works
 
 1. You send a message in a configured Slack channel
-2. Claudeway spawns `claude -p` in the mapped project folder with a deterministic session ID
+2. Claudeway spawns `claude -p` in the mapped project folder, resuming the existing session if one exists
 3. Claude Code reads your codebase, runs tools, and produces a response
 4. The response is posted back as a threaded reply in Slack
 5. Reactions show status: hourglass (processing), checkmark (done), X (error)
 
-Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + folder pair, so conversations persist across restarts.
+Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + folder pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.
 
 ## Self-Configuration
 
@@ -66,6 +66,7 @@ SLACK_APP_TOKEN=xapp-your-app-level-token
 Create `config.json`:
 ```json
 {
+  "systemChannel": "C0123456789",
   "channels": {
     "C0123456789": {
       "name": "my-project",
@@ -130,7 +131,19 @@ launchctl load -w ~/Library/LaunchAgents/com.claudeway.plist  # start again
 
 The install script auto-detects your `node` path, project directory, and user environment. The generated plist is placed at `~/Library/LaunchAgents/com.claudeway.plist`.
 
-## Channel Config Options
+## Config Options
+
+### Top-level
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `systemChannel` | Channel ID for startup/shutdown notifications | none (disabled) |
+| `channels` | Channel-to-folder mappings | required |
+| `defaults` | Default model, prompt, and timeout | required |
+
+Set `systemChannel` to the ID of one of your configured channels. Claudeway will post a message there on startup and shutdown, so you can tell when it's running.
+
+### Channel Config
 
 | Field | Description | Default |
 |-------|-------------|---------|
@@ -144,7 +157,7 @@ The install script auto-detects your `node` path, project directory, and user en
 
 **Claude hangs / no response:** Make sure stdin is not piped to the Claude process. Claudeway handles this internally by using `stdio: ['ignore', 'pipe', 'pipe']` when spawning the CLI.
 
-**"Session ID already in use":** This happens when a previous Claude session with the same deterministic ID didn't exit cleanly. Claudeway automatically falls back to a fresh session without the session ID. The stale session will expire on its own.
+**"Session ID already in use":** This happens when a previous Claude session didn't exit cleanly. Claudeway automatically clears stale session artifacts and retries once. No manual intervention needed.
 
 **Service won't start via launchd:** Ensure `HOME` and `USER` are set in the plist's `EnvironmentVariables`. Claude Code needs these to find its auth credentials.
 

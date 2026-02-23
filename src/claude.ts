@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, unlinkSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
 import { getConfigPath } from './config.js';
@@ -90,6 +90,41 @@ function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promi
   });
 }
 
+/**
+ * Resolve paths to all artifacts Claude CLI creates for a session.
+ * Claude encodes folder paths by replacing / with - (keeping the leading dash).
+ */
+function sessionArtifactPaths(sessionId: string, cwd: string) {
+  const home = process.env.HOME ?? `/Users/${process.env.USER ?? ''}`;
+  const encodedPath = cwd.replace(/\//g, '-');
+  return {
+    jsonl: resolve(home, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`),
+    dir: resolve(home, '.claude', 'projects', encodedPath, sessionId),
+    todo: resolve(home, '.claude', 'todos', `${sessionId}-agent-${sessionId}.json`),
+  };
+}
+
+/**
+ * Remove all session artifacts so the session ID can be reused.
+ * Called on "already in use" errors before retrying.
+ */
+function clearSessionArtifacts(sessionId: string, cwd: string): void {
+  const paths = sessionArtifactPaths(sessionId, cwd);
+  for (const [name, p] of Object.entries(paths)) {
+    try {
+      if (!existsSync(p)) continue;
+      if (name === 'dir') {
+        rmSync(p, { recursive: true, force: true });
+      } else {
+        unlinkSync(p);
+      }
+      console.log(`Cleared session artifact: ${p}`);
+    } catch {
+      // Ignore — file may already be gone or locked
+    }
+  }
+}
+
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   const { message, cwd, model, systemPrompt, timeoutMs, channelId } = options;
 
@@ -97,14 +132,17 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
   const sessionId = deriveSessionId(channelId, cwd);
 
+  // Check if a session file already exists — if so, resume it for context continuity
+  const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
+  const resuming = existsSync(sessionFile);
+
   const args = [
     '-p',
     '--output-format',
     'json',
     '--model',
     model,
-    '--session-id',
-    sessionId,
+    ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--append-system-prompt',
     prompt,
     '--dangerously-skip-permissions',
@@ -118,15 +156,23 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
   args.push(message);
 
-  // Try with session ID (resumes if session exists, creates new if not)
+  console.log(`[${channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
+
   try {
     return await runClaudeProcess(args, cwd, timeoutMs);
-  } catch {
-    // If session-id fails, fall back to no session flag
-    console.log(`[${channelId}] Session ${sessionId} failed, trying without session-id`);
-    const fallbackArgs = args.filter(
-      (a, i) => a !== '--session-id' && args[i - 1] !== '--session-id',
-    );
-    return await runClaudeProcess(fallbackArgs, cwd, timeoutMs);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('already in use')) {
+      console.log(
+        `[${channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
+      );
+      clearSessionArtifacts(sessionId, cwd);
+      // Retry with --session-id (fresh session, since we just cleared artifacts)
+      const freshArgs = args.map((a, i) =>
+        a === '--resume' && args[i + 1] === sessionId ? '--session-id' : a,
+      );
+      return await runClaudeProcess(freshArgs, cwd, timeoutMs);
+    }
+    throw err;
   }
 }

@@ -18,6 +18,7 @@ export interface Defaults {
 export interface Config {
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
+  systemChannel?: string;
 }
 
 const CONFIG_PATH = resolve(process.cwd(), 'config.json');

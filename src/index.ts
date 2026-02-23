@@ -32,9 +32,10 @@ function releaseLock(): void {
   }
 }
 
-function killOrphanClaude(): void {
+function killOrphanProcesses(): void {
+  // Kill any claude -p processes and their child processes from previous runs
   try {
-    execSync('pkill -f "claude.*dangerously-skip-permissions" 2>/dev/null', {
+    execSync('pkill -9 -f "claude.*dangerously-skip-permissions" 2>/dev/null', {
       stdio: 'ignore',
     });
   } catch {
@@ -42,14 +43,40 @@ function killOrphanClaude(): void {
   }
 }
 
+async function notifySystemChannel(app: App | null, message: string): Promise<void> {
+  if (!app) return;
+  try {
+    const config = loadConfig();
+    if (!config.systemChannel) return;
+    await app.client.chat.postMessage({
+      channel: config.systemChannel,
+      text: message,
+    });
+  } catch {
+    // Best-effort — don't crash on notification failure
+  }
+}
+
+let slackApp: App | null = null;
+
 function shutdown(): void {
   console.log('Claudeway shutting down');
-  killOrphanClaude();
-  releaseLock();
-  process.exit(0);
+  // Fire-and-forget shutdown notification, then exit after brief delay
+  notifySystemChannel(slackApp, ':wave: Claudeway shutting down').finally(() => {
+    killOrphanProcesses();
+    releaseLock();
+    process.exit(0);
+  });
+  // Force exit after 3s if notification hangs
+  setTimeout(() => {
+    killOrphanProcesses();
+    releaseLock();
+    process.exit(0);
+  }, 3000);
 }
 
 acquireLock();
+killOrphanProcesses();
 process.on('exit', releaseLock);
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
@@ -77,6 +104,7 @@ const app = new App({
   socketMode: true,
   appToken: SLACK_APP_TOKEN,
 });
+slackApp = app;
 
 registerMessageHandler(app);
 
@@ -86,11 +114,17 @@ app.error(async (error) => {
 
 await app.start();
 
+const channelCount = Object.keys(config.channels).length;
 console.log('Claudeway started');
 console.log('Configured channels:');
 for (const [id, ch] of Object.entries(config.channels)) {
   console.log(`  #${ch.name} (${id}) -> ${ch.folder}`);
 }
+
+await notifySystemChannel(
+  app,
+  `:rocket: Claudeway started (${channelCount} channel${channelCount === 1 ? '' : 's'} configured)`,
+);
 
 // Drain any messages left in queue from before restart
 drainAllPending(app);
