@@ -2,6 +2,7 @@ import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import { loadConfig, resolvedChannelConfig } from './config.js';
 import { runClaude } from './claude.js';
+import { enqueue, dequeue, getPendingForChannel, type QueuedMessage } from './queue.js';
 
 interface SlackMessage {
   text?: string;
@@ -18,9 +19,6 @@ const FILE_THRESHOLD = 12000;
 
 // Per-channel processing lock — one message at a time per channel
 const channelBusy = new Set<string>();
-
-// Per-channel message queue — holds the latest pending message per channel
-const channelQueue = new Map<string, { msg: SlackMessage; client: WebClient }>();
 
 function splitMessage(text: string): string[] {
   const chunks: string[] = [];
@@ -85,70 +83,74 @@ async function safeReact(
   }
 }
 
-async function processMessage(msg: SlackMessage, client: WebClient): Promise<void> {
+async function processQueuedMessage(queued: QueuedMessage, client: WebClient): Promise<void> {
   let config;
   try {
     config = loadConfig();
   } catch (err) {
     console.error('Failed to load config:', err);
+    dequeue(queued.channelId, queued.ts);
     return;
   }
 
-  const channelConfig = resolvedChannelConfig(config, msg.channel);
-  if (!channelConfig) return;
+  const channelConfig = resolvedChannelConfig(config, queued.channelId);
+  if (!channelConfig) {
+    dequeue(queued.channelId, queued.ts);
+    return;
+  }
 
-  const threadTs = msg.thread_ts ?? msg.ts;
-
-  await safeReact(client, msg.channel, msg.ts, 'hourglass_flowing_sand');
+  await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand');
 
   try {
-    console.log(`[${channelConfig.name}] Processing: ${msg.text!.substring(0, 80)}...`);
+    console.log(`[${channelConfig.name}] Processing: ${queued.text.substring(0, 80)}...`);
 
     const result = await runClaude({
-      message: msg.text!,
+      message: queued.text,
       cwd: channelConfig.folder,
       model: channelConfig.model,
       systemPrompt: channelConfig.systemPrompt,
       timeoutMs: channelConfig.timeoutMs,
-      channelId: msg.channel,
+      channelId: queued.channelId,
     });
 
-    await safeReact(client, msg.channel, msg.ts, 'hourglass_flowing_sand', 'remove');
-    await safeReact(client, msg.channel, msg.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
 
-    await sendResponse(client, msg.channel, threadTs, result.response);
+    await sendResponse(client, queued.channelId, queued.threadTs, result.response);
 
     if (result.cost !== null) {
       console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
     }
   } catch (err) {
-    await safeReact(client, msg.channel, msg.ts, 'hourglass_flowing_sand', 'remove');
-    await safeReact(client, msg.channel, msg.ts, 'x');
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+    await safeReact(client, queued.channelId, queued.ts, 'x');
 
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error(`[${channelConfig.name}] Error:`, errorMsg);
 
     try {
       await client.chat.postMessage({
-        channel: msg.channel,
-        thread_ts: threadTs,
+        channel: queued.channelId,
+        thread_ts: queued.threadTs,
         text: `:warning: Error: ${errorMsg}`,
       });
     } catch (replyErr) {
       console.error(`[${channelConfig.name}] Failed to send error reply:`, replyErr);
     }
   }
+
+  // Remove from persistent queue after processing (success or error)
+  dequeue(queued.channelId, queued.ts);
 }
 
-async function drainQueue(channelId: string): Promise<void> {
+async function drainChannel(channelId: string, client: WebClient): Promise<void> {
   channelBusy.add(channelId);
 
   try {
-    // Process current + any queued message
-    while (channelQueue.has(channelId)) {
-      const queued = channelQueue.get(channelId)!;
-      channelQueue.delete(channelId);
-      await processMessage(queued.msg, queued.client);
+    let pending = getPendingForChannel(channelId);
+    while (pending.length > 0) {
+      await processQueuedMessage(pending[0], client);
+      pending = getPendingForChannel(channelId);
     }
   } finally {
     channelBusy.delete(channelId);
@@ -163,7 +165,7 @@ export function registerMessageHandler(app: App): void {
     if (msg.subtype || msg.bot_id) return;
     if (!msg.text) return;
 
-    // Quick config check — don't queue messages for unconfigured channels
+    // Quick config check
     try {
       const config = loadConfig();
       if (!resolvedChannelConfig(config, msg.channel)) return;
@@ -171,17 +173,50 @@ export function registerMessageHandler(app: App): void {
       return;
     }
 
+    const threadTs = msg.thread_ts ?? msg.ts;
+
+    // Persist to queue
+    enqueue({
+      channelId: msg.channel,
+      userId: msg.user ?? 'unknown',
+      text: msg.text,
+      ts: msg.ts,
+      threadTs,
+      queuedAt: new Date().toISOString(),
+    });
+
     if (channelBusy.has(msg.channel)) {
-      // Channel is busy — queue this message (replaces any previous queued message)
-      console.log(`[${msg.channel}] Busy, queuing message`);
-      channelQueue.set(msg.channel, { msg, client });
+      console.log(`[${msg.channel}] Busy, message queued`);
       return;
     }
 
-    // Not busy — put in queue and start draining
-    channelQueue.set(msg.channel, { msg, client });
-    drainQueue(msg.channel).catch((err) => {
+    drainChannel(msg.channel, client).catch((err) => {
       console.error(`[${msg.channel}] Queue drain error:`, err);
     });
   });
+}
+
+/**
+ * Process any messages left in the queue from before a restart.
+ * Call after Bolt app.start() with the Slack client.
+ */
+export function drainAllPending(app: App): void {
+  // Drain pending messages for all channels after a short delay
+  setTimeout(async () => {
+    const { getPending } = await import('./queue.js');
+    const pending = getPending();
+    if (pending.length === 0) return;
+
+    console.log(`[startup] Found ${pending.length} queued message(s) from before restart`);
+
+    const channels = [...new Set(pending.map((m) => m.channelId))];
+    for (const channelId of channels) {
+      if (channelBusy.has(channelId)) continue;
+      // Use the app's web client
+      const client = app.client;
+      drainChannel(channelId, client).catch((err) => {
+        console.error(`[${channelId}] Startup drain error:`, err);
+      });
+    }
+  }, 3000);
 }

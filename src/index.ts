@@ -4,7 +4,8 @@ import { execSync } from 'child_process';
 import { resolve } from 'path';
 import { App } from '@slack/bolt';
 import { loadConfig } from './config.js';
-import { registerMessageHandler } from './slack.js';
+import { registerMessageHandler, drainAllPending } from './slack.js';
+import { ensureQueueDir } from './queue.js';
 
 // Pidfile lock — ensure only one gateway runs at a time
 const PIDFILE = resolve(process.cwd(), 'claudeway.pid');
@@ -68,6 +69,7 @@ if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN) {
   process.exit(1);
 }
 
+ensureQueueDir();
 const config = loadConfig();
 
 const app = new App({
@@ -89,6 +91,9 @@ console.log('Configured channels:');
 for (const [id, ch] of Object.entries(config.channels)) {
   console.log(`  #${ch.name} (${id}) -> ${ch.folder}`);
 }
+
+// Drain any messages left in queue from before restart
+drainAllPending(app);
 
 // Heartbeat — log every 30 minutes so you can tell it's alive
 setInterval(
