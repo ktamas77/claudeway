@@ -115,6 +115,10 @@ cat > ~/Library/LaunchAgents/com.claudeway.plist << 'EOF'
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/youruser</string>
+        <key>USER</key>
+        <string>youruser</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -150,6 +154,18 @@ tail -f ~/dev/ktamas77/claudeway/claudeway.log                 # logs
 | `model` | Claude model (`opus`, `sonnet`) | from defaults |
 | `systemPrompt` | Custom system prompt | from defaults |
 | `timeoutMs` | CLI timeout in ms | 300000 (5 min) |
+
+## Troubleshooting
+
+**Claude hangs / no response:** Make sure stdin is not piped to the Claude process. Claudeway handles this internally by using `stdio: ['ignore', 'pipe', 'pipe']` when spawning the CLI.
+
+**"Session ID already in use":** This happens when a previous Claude session with the same deterministic ID didn't exit cleanly. Claudeway automatically falls back to a fresh session without the session ID. The stale session will expire on its own.
+
+**Service won't start via launchd:** Ensure `HOME` and `USER` are set in the plist's `EnvironmentVariables`. Claude Code needs these to find its auth credentials.
+
+**"Cannot be launched inside another Claude Code session":** Don't start Claudeway from within a Claude Code terminal. The `CLAUDECODE` env var is inherited and blocks nested sessions. Start from a regular terminal or use the LaunchAgent.
+
+**Only one instance runs at a time:** Claudeway uses a pidfile lock (`claudeway.pid`). If the service crashes, the stale pidfile is detected and cleaned up automatically.
 
 ## Pairs Well With
 

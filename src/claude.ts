@@ -30,10 +30,15 @@ export function deriveSessionId(channelId: string, folder: string): string {
 
 function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
+    // Ensure HOME is set — launchd may not provide it
+    if (!env.HOME) env.HOME = '/Users/' + (env.USER ?? 'tamas');
+
     const proc = spawn('claude', args, {
       cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, CLAUDECODE: undefined },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
     });
 
     let stdout = '';

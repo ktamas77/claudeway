@@ -79,7 +79,7 @@ export function registerMessageHandler(app: App): void {
     }
 
     const channelConfig = resolvedChannelConfig(config, msg.channel);
-    if (!channelConfig) return; // Not a configured channel
+    if (!channelConfig) return;
 
     const threadTs = msg.thread_ts ?? msg.ts;
 
