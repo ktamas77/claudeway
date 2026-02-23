@@ -1,7 +1,7 @@
 import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
-import { loadConfig, resolvedChannelConfig } from './config.js';
-import { runClaude } from './claude.js';
+import { loadConfig, resolvedChannelConfig, type ResponseMode } from './config.js';
+import { runClaude, runClaudeStreaming } from './claude.js';
 import { enqueue, dequeue, getPendingForChannel, type QueuedMessage } from './queue.js';
 
 interface SlackMessage {
@@ -44,6 +44,168 @@ function markdownToSlackMrkdwn(text: string): string {
   result = result.replace(/```\w+\n/g, '```\n');
 
   return result;
+}
+
+const STREAM_UPDATE_INTERVAL_MS = 2000;
+const STREAMING_INDICATOR = ' :writing_hand:';
+
+class StreamingResponder {
+  private client: WebClient;
+  private channel: string;
+  private threadTs: string;
+  private messageTs: string | null = null;
+  private fullText = '';
+  private lastUpdateLen = 0;
+  private updateTimer: ReturnType<typeof setInterval> | null = null;
+  private finished = false;
+
+  constructor(client: WebClient, channel: string, threadTs: string) {
+    this.client = client;
+    this.channel = channel;
+    this.threadTs = threadTs;
+  }
+
+  onTextDelta(text: string): void {
+    this.fullText += text;
+    // Start the throttled update loop on first chunk
+    if (!this.updateTimer && !this.finished) {
+      this.updateTimer = setInterval(() => this.flush(), STREAM_UPDATE_INTERVAL_MS);
+      // Post the initial message immediately
+      this.flush();
+    }
+  }
+
+  private async flush(): Promise<void> {
+    if (this.fullText.length === 0 || this.fullText.length === this.lastUpdateLen) return;
+
+    const displayText = markdownToSlackMrkdwn(this.fullText);
+    // Truncate for Slack's single-message limit, append indicator if still streaming
+    const truncated =
+      displayText.length > MAX_MESSAGE_LENGTH
+        ? displayText.substring(0, MAX_MESSAGE_LENGTH - 20) + '\n_[streaming...]_'
+        : displayText;
+    const withIndicator = this.finished ? truncated : truncated + STREAMING_INDICATOR;
+
+    try {
+      if (!this.messageTs) {
+        const res = await this.client.chat.postMessage({
+          channel: this.channel,
+          thread_ts: this.threadTs,
+          text: withIndicator,
+        });
+        this.messageTs = res.ts ?? null;
+      } else {
+        await this.client.chat.update({
+          channel: this.channel,
+          ts: this.messageTs,
+          text: withIndicator,
+        });
+      }
+      this.lastUpdateLen = this.fullText.length;
+    } catch (err) {
+      console.error(`[streaming] Failed to update message:`, err);
+    }
+  }
+
+  async finish(): Promise<void> {
+    this.finished = true;
+    if (this.updateTimer) {
+      clearInterval(this.updateTimer);
+      this.updateTimer = null;
+    }
+    // Final update to remove the streaming indicator
+    if (this.fullText.length > 0) {
+      await this.flush();
+    }
+  }
+
+  getFullText(): string {
+    return this.fullText;
+  }
+
+  getMessageTs(): string | null {
+    return this.messageTs;
+  }
+}
+
+class NativeStreamingResponder {
+  private client: WebClient;
+  private channel: string;
+  private threadTs: string;
+  private streamId: string | null = null;
+  private fullText = '';
+  private buffer = '';
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private finished = false;
+
+  constructor(client: WebClient, channel: string, threadTs: string) {
+    this.client = client;
+    this.channel = channel;
+    this.threadTs = threadTs;
+  }
+
+  onTextDelta(text: string): void {
+    this.fullText += text;
+    this.buffer += text;
+    if (!this.flushTimer && !this.finished) {
+      this.flushTimer = setInterval(() => this.flush(), STREAM_UPDATE_INTERVAL_MS);
+      // Start the stream immediately on first chunk
+      this.startStream();
+    }
+  }
+
+  private async startStream(): Promise<void> {
+    try {
+      const res = (await this.client.apiCall('chat.startStream', {
+        channel: this.channel,
+        thread_ts: this.threadTs,
+      })) as { stream_id?: string };
+      this.streamId = res.stream_id ?? null;
+      // Flush any buffered text
+      await this.flush();
+    } catch (err) {
+      console.error(`[native-stream] Failed to start stream:`, err);
+    }
+  }
+
+  private async flush(): Promise<void> {
+    if (!this.streamId || this.buffer.length === 0) return;
+
+    const chunk = this.buffer;
+    this.buffer = '';
+
+    try {
+      await this.client.apiCall('chat.appendStream', {
+        stream_id: this.streamId,
+        text: chunk,
+      });
+    } catch (err) {
+      console.error(`[native-stream] Failed to append:`, err);
+    }
+  }
+
+  async finish(): Promise<void> {
+    this.finished = true;
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.streamId) {
+      // Flush remaining buffer
+      await this.flush();
+      try {
+        await this.client.apiCall('chat.stopStream', {
+          stream_id: this.streamId,
+        });
+      } catch (err) {
+        console.error(`[native-stream] Failed to stop stream:`, err);
+      }
+    }
+  }
+
+  getFullText(): string {
+    return this.fullText;
+  }
 }
 
 // Per-channel processing lock — one message at a time per channel
@@ -115,6 +277,155 @@ async function safeReact(
   }
 }
 
+async function processBatch(
+  queued: QueuedMessage,
+  client: WebClient,
+  channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+): Promise<void> {
+  const result = await runClaude({
+    message: queued.text,
+    cwd: channelConfig.folder,
+    model: channelConfig.model,
+    systemPrompt: channelConfig.systemPrompt,
+    timeoutMs: channelConfig.timeoutMs,
+    channelId: queued.channelId,
+  });
+
+  await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+  await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+
+  await sendResponse(client, queued.channelId, queued.threadTs, result.response);
+
+  if (result.cost !== null) {
+    console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+  }
+}
+
+async function processStreamUpdate(
+  queued: QueuedMessage,
+  client: WebClient,
+  channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+): Promise<void> {
+  const responder = new StreamingResponder(client, queued.channelId, queued.threadTs);
+
+  const result = await runClaudeStreaming({
+    message: queued.text,
+    cwd: channelConfig.folder,
+    model: channelConfig.model,
+    systemPrompt: channelConfig.systemPrompt,
+    timeoutMs: channelConfig.timeoutMs,
+    channelId: queued.channelId,
+    onTextDelta: (text) => responder.onTextDelta(text),
+  });
+
+  await responder.finish();
+
+  await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+  await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+
+  // If final response exceeds file threshold, upload as file and delete the streamed message
+  const finalText = result.response || responder.getFullText();
+  if (finalText.length > FILE_THRESHOLD) {
+    // Delete the streamed message and upload as file instead
+    const msgTs = responder.getMessageTs();
+    if (msgTs) {
+      try {
+        await client.chat.delete({ channel: queued.channelId, ts: msgTs });
+      } catch {
+        // Best effort — may lack permission
+      }
+    }
+    await client.files.uploadV2({
+      channel_id: queued.channelId,
+      thread_ts: queued.threadTs,
+      content: finalText,
+      filename: 'response.md',
+      title: 'Response',
+    });
+  } else if (finalText.length > MAX_MESSAGE_LENGTH) {
+    // Final text fits in messages but was truncated during streaming — do a final complete send
+    const formatted = markdownToSlackMrkdwn(finalText);
+    const chunks = splitMessage(formatted);
+    // Update the existing message with the first chunk
+    const msgTs = responder.getMessageTs();
+    if (msgTs && chunks.length > 0) {
+      try {
+        await client.chat.update({
+          channel: queued.channelId,
+          ts: msgTs,
+          text: chunks[0],
+        });
+      } catch {
+        // Fall through to post
+      }
+      // Post remaining chunks as follow-up messages
+      for (let i = 1; i < chunks.length; i++) {
+        await client.chat.postMessage({
+          channel: queued.channelId,
+          thread_ts: queued.threadTs,
+          text: chunks[i],
+        });
+      }
+    }
+  }
+
+  if (result.cost !== null) {
+    console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+  }
+}
+
+async function processStreamNative(
+  queued: QueuedMessage,
+  client: WebClient,
+  channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+): Promise<void> {
+  const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs);
+
+  const result = await runClaudeStreaming({
+    message: queued.text,
+    cwd: channelConfig.folder,
+    model: channelConfig.model,
+    systemPrompt: channelConfig.systemPrompt,
+    timeoutMs: channelConfig.timeoutMs,
+    channelId: queued.channelId,
+    onTextDelta: (text) => responder.onTextDelta(text),
+  });
+
+  await responder.finish();
+
+  await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+  await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+
+  // Native streaming handles display automatically; fall back to file upload for huge responses
+  const finalText = result.response || responder.getFullText();
+  if (finalText.length > FILE_THRESHOLD) {
+    await client.files.uploadV2({
+      channel_id: queued.channelId,
+      thread_ts: queued.threadTs,
+      content: finalText,
+      filename: 'response.md',
+      title: 'Response',
+    });
+  }
+
+  if (result.cost !== null) {
+    console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+  }
+}
+
+const MODE_PROCESSORS: Record<
+  ResponseMode,
+  (
+    queued: QueuedMessage,
+    client: WebClient,
+    config: ReturnType<typeof resolvedChannelConfig> & object,
+  ) => Promise<void>
+> = {
+  batch: processBatch,
+  'stream-update': processStreamUpdate,
+  'stream-native': processStreamNative,
+};
+
 async function processQueuedMessage(queued: QueuedMessage, client: WebClient): Promise<void> {
   let config;
   try {
@@ -133,26 +444,11 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
 
   await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand');
 
+  const mode = channelConfig.responseMode;
+  console.log(`[${channelConfig.name}] Processing (${mode}): ${queued.text.substring(0, 80)}...`);
+
   try {
-    console.log(`[${channelConfig.name}] Processing: ${queued.text.substring(0, 80)}...`);
-
-    const result = await runClaude({
-      message: queued.text,
-      cwd: channelConfig.folder,
-      model: channelConfig.model,
-      systemPrompt: channelConfig.systemPrompt,
-      timeoutMs: channelConfig.timeoutMs,
-      channelId: queued.channelId,
-    });
-
-    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
-    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
-
-    await sendResponse(client, queued.channelId, queued.threadTs, result.response);
-
-    if (result.cost !== null) {
-      console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
-    }
+    await MODE_PROCESSORS[mode](queued, client, channelConfig);
   } catch (err) {
     await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
     await safeReact(client, queued.channelId, queued.ts, 'x');

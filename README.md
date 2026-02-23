@@ -139,7 +139,7 @@ The install script auto-detects your `node` path, project directory, and user en
 |-------|-------------|---------|
 | `systemChannel` | Channel ID for startup/shutdown notifications | none (disabled) |
 | `channels` | Channel-to-folder mappings | required |
-| `defaults` | Default model, prompt, and timeout | required |
+| `defaults` | Default model, prompt, timeout, and response mode | required |
 
 Set `systemChannel` to the ID of one of your configured channels. Claudeway will post a message there on startup and shutdown, so you can tell when it's running.
 
@@ -152,6 +152,19 @@ Set `systemChannel` to the ID of one of your configured channels. Claudeway will
 | `model` | Claude model (`opus`, `sonnet`) | from defaults |
 | `systemPrompt` | Custom system prompt | from defaults |
 | `timeoutMs` | CLI timeout in ms | 300000 (5 min) |
+| `responseMode` | How responses are delivered (see below) | from defaults |
+
+### Response Modes
+
+Set `responseMode` in `defaults` or per channel:
+
+| Mode | Description |
+|------|-------------|
+| `batch` | Wait for the full response, then post it. Default, most reliable. |
+| `stream-update` | Post a message immediately, then update it every ~2 seconds as text arrives. Uses `chat.update`. |
+| `stream-native` | Use Slack's native streaming API (`chat.startStream`/`appendStream`/`stopStream`). Experimental. |
+
+Streaming modes give real-time feedback for long responses instead of showing an hourglass for 30+ seconds. If the final response exceeds the file upload threshold (12KB), streaming modes automatically fall back to uploading a file.
 
 ## Troubleshooting
 
@@ -176,6 +189,10 @@ Set `systemChannel` to the ID of one of your configured channels. Claudeway will
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - Claude Pro or Max subscription
 - Node.js 20+
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 

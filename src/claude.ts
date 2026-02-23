@@ -13,6 +13,10 @@ export interface ClaudeOptions {
   channelId: string;
 }
 
+export interface ClaudeStreamingOptions extends ClaudeOptions {
+  onTextDelta: (text: string) => void;
+}
+
 export interface ClaudeResult {
   response: string;
   sessionId: string | null;
@@ -30,18 +34,21 @@ export function deriveSessionId(channelId: string, folder: string): string {
   return uuidv5(`${channelId}:${folder}`, CLAUDEWAY_NAMESPACE);
 }
 
+function spawnClaudeProcess(args: string[], cwd: string) {
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
+
+  return spawn('claude', args, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+  });
+}
+
 function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
-    // Ensure HOME is set — launchd may not provide it
-    if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
-
-    const proc = spawn('claude', args, {
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
-    });
+    const proc = spawnClaudeProcess(args, cwd);
 
     let stdout = '';
     let stderr = '';
@@ -90,6 +97,97 @@ function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promi
   });
 }
 
+function runClaudeStreamingProcess(
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  onTextDelta: (text: string) => void,
+): Promise<ClaudeResult> {
+  return new Promise((resolve, reject) => {
+    const proc = spawnClaudeProcess(args, cwd);
+
+    let stderr = '';
+    let fullText = '';
+    let sessionId: string | null = null;
+    let cost: number | null = null;
+    let lineBuffer = '';
+
+    function processLine(line: string) {
+      if (!line.trim()) return;
+      try {
+        const obj = JSON.parse(line);
+
+        // Text delta — stream to callback
+        // Events are wrapped: {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
+        if (
+          obj.type === 'stream_event' &&
+          obj.event?.type === 'content_block_delta' &&
+          obj.event.delta?.type === 'text_delta' &&
+          obj.event.delta.text
+        ) {
+          fullText += obj.event.delta.text;
+          onTextDelta(obj.event.delta.text);
+          return;
+        }
+
+        // Result event — extract metadata
+        if (obj.type === 'result') {
+          sessionId = obj.session_id ?? sessionId;
+          cost = obj.cost_usd ?? obj.total_cost_usd ?? cost;
+          if (obj.result) {
+            fullText = obj.result;
+          }
+        }
+      } catch {
+        // Not valid JSON — ignore partial lines
+      }
+    }
+
+    proc.stdout.on('data', (data: Buffer) => {
+      lineBuffer += data.toString();
+      const lines = lineBuffer.split('\n');
+      // Keep the last (possibly incomplete) line in the buffer
+      lineBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        processLine(line);
+      }
+    });
+
+    proc.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`Claude timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      // Process any remaining buffered line
+      if (lineBuffer.trim()) {
+        processLine(lineBuffer);
+      }
+
+      if (code !== 0) {
+        reject(new Error(`Claude exited with code ${code}: ${stderr.trim()}`));
+        return;
+      }
+
+      resolve({
+        response: fullText,
+        sessionId,
+        cost,
+      });
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      reject(new Error(`Failed to spawn claude: ${err.message}`));
+    });
+  });
+}
+
 /**
  * Resolve paths to all artifacts Claude CLI creates for a session.
  * Claude encodes folder paths by replacing / with - (keeping the leading dash).
@@ -125,21 +223,24 @@ function clearSessionArtifacts(sessionId: string, cwd: string): void {
   }
 }
 
-export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
-  const { message, cwd, model, systemPrompt, timeoutMs, channelId } = options;
+function buildClaudeArgs(
+  options: ClaudeOptions,
+  outputFormat: 'json' | 'stream-json',
+): { args: string[]; sessionId: string; cwd: string; resuming: boolean } {
+  const { message, cwd, model, systemPrompt, channelId } = options;
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
   const sessionId = deriveSessionId(channelId, cwd);
 
-  // Check if a session file already exists — if so, resume it for context continuity
   const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
   const resuming = existsSync(sessionFile);
 
   const args = [
     '-p',
     '--output-format',
-    'json',
+    outputFormat,
+    ...(outputFormat === 'stream-json' ? ['--verbose', '--include-partial-messages'] : []),
     '--model',
     model,
     ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
@@ -148,7 +249,6 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
     '--dangerously-skip-permissions',
   ];
 
-  // Pass MCP config if mcp.json exists in the project root
   const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
   if (existsSync(mcpConfigPath)) {
     args.push('--mcp-config', mcpConfigPath);
@@ -156,22 +256,55 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
   args.push(message);
 
-  console.log(`[${channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
+  return { args, sessionId, cwd, resuming };
+}
+
+function makeFreshArgs(args: string[], sessionId: string): string[] {
+  return args.map((a, i) => (a === '--resume' && args[i + 1] === sessionId ? '--session-id' : a));
+}
+
+export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
+  const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'json');
+
+  console.log(`[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
 
   try {
-    return await runClaudeProcess(args, cwd, timeoutMs);
+    return await runClaudeProcess(args, cwd, options.timeoutMs);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('already in use')) {
       console.log(
-        `[${channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
+        `[${options.channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
       );
       clearSessionArtifacts(sessionId, cwd);
-      // Retry with --session-id (fresh session, since we just cleared artifacts)
-      const freshArgs = args.map((a, i) =>
-        a === '--resume' && args[i + 1] === sessionId ? '--session-id' : a,
+      return await runClaudeProcess(makeFreshArgs(args, sessionId), cwd, options.timeoutMs);
+    }
+    throw err;
+  }
+}
+
+export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
+  const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'stream-json');
+
+  console.log(
+    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} streaming session ${sessionId}`,
+  );
+
+  try {
+    return await runClaudeStreamingProcess(args, cwd, options.timeoutMs, options.onTextDelta);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('already in use')) {
+      console.log(
+        `[${options.channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
       );
-      return await runClaudeProcess(freshArgs, cwd, timeoutMs);
+      clearSessionArtifacts(sessionId, cwd);
+      return await runClaudeStreamingProcess(
+        makeFreshArgs(args, sessionId),
+        cwd,
+        options.timeoutMs,
+        options.onTextDelta,
+      );
     }
     throw err;
   }

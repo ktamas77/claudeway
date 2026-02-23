@@ -9,6 +9,7 @@
   "defaults": {
     "model": "opus",
     "systemPrompt": "Be concise. Format responses for Slack mrkdwn.",
-    "timeoutMs": 300000
+    "timeoutMs": 300000,
+    "responseMode": "batch"
   }
 }
