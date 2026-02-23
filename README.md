@@ -143,6 +143,8 @@ The install script auto-detects your `node` path, project directory, and user en
 
 [maxassist](https://github.com/ktamas77/maxassist) - Use Claudeway as the communication layer and maxassist for orchestrating complex multi-step AI workflows. Together they form a powerful remote development setup.
 
+[Forever Memory](https://forever.squidcode.com) - Persistent memory for Claude Code across folders and machines. Give your Claudeway channels shared context that survives session boundaries.
+
 ## Requirements
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
