@@ -1,5 +1,6 @@
 import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
+import type { ChatStreamer } from '@slack/web-api';
 import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -111,7 +112,7 @@ export function markdownToSlackMrkdwn(text: string): string {
   return result;
 }
 
-const STREAM_UPDATE_INTERVAL_MS = 1000;
+const STREAM_UPDATE_INTERVAL_MS = 500;
 const STREAMING_INDICATOR = ' :writing_hand:';
 
 class StreamingResponder {
@@ -199,73 +200,61 @@ class NativeStreamingResponder {
   private client: WebClient;
   private channel: string;
   private threadTs: string;
-  private streamId: string | null = null;
+  private streamer: ChatStreamer | null = null;
   private fullText = '';
-  private buffer = '';
-  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private thinkingTs: string | null;
   private finished = false;
 
-  constructor(client: WebClient, channel: string, threadTs: string) {
+  constructor(client: WebClient, channel: string, threadTs: string, thinkingTs?: string) {
     this.client = client;
     this.channel = channel;
     this.threadTs = threadTs;
+    this.thinkingTs = thinkingTs ?? null;
   }
 
   onTextDelta(text: string): void {
     this.fullText += text;
-    this.buffer += text;
-    if (!this.flushTimer && !this.finished) {
-      this.flushTimer = setInterval(() => this.flush(), STREAM_UPDATE_INTERVAL_MS);
-      // Start the stream immediately on first chunk
-      this.startStream();
-    }
-  }
-
-  private async startStream(): Promise<void> {
-    try {
-      const res = (await this.client.apiCall('chat.startStream', {
+    if (!this.streamer && !this.finished) {
+      // Use buffer_size: 1 so the stream message appears immediately on first delta
+      this.streamer = this.client.chatStream({
         channel: this.channel,
         thread_ts: this.threadTs,
-      })) as { stream_id?: string };
-      this.streamId = res.stream_id ?? null;
-      // Flush any buffered text
-      await this.flush();
-    } catch (err) {
-      console.error(`[native-stream] Failed to start stream:`, err);
-    }
-  }
-
-  private async flush(): Promise<void> {
-    if (!this.streamId || this.buffer.length === 0) return;
-
-    const chunk = this.buffer;
-    this.buffer = '';
-
-    try {
-      await this.client.apiCall('chat.appendStream', {
-        stream_id: this.streamId,
-        text: chunk,
+        buffer_size: 1,
       });
-    } catch (err) {
-      console.error(`[native-stream] Failed to append:`, err);
+      // Delete the thinking preview now that the real stream has started
+      if (this.thinkingTs) {
+        const ts = this.thinkingTs;
+        this.thinkingTs = null;
+        this.client.chat.delete({ channel: this.channel, ts }).catch(() => {});
+      }
+      // Feed the accumulated text as the first append
+      this.streamer.append({ markdown_text: text }).catch((err) => {
+        console.error('[native-stream] Failed to append initial text:', err);
+      });
+    } else if (this.streamer) {
+      this.streamer.append({ markdown_text: text }).catch((err) => {
+        console.error('[native-stream] Failed to append text:', err);
+      });
     }
   }
 
   async finish(): Promise<void> {
     this.finished = true;
-    if (this.flushTimer) {
-      clearInterval(this.flushTimer);
-      this.flushTimer = null;
-    }
-    if (this.streamId) {
-      // Flush remaining buffer
-      await this.flush();
+    // Clean up thinking message if stream never started (empty response)
+    if (this.thinkingTs) {
+      const ts = this.thinkingTs;
+      this.thinkingTs = null;
       try {
-        await this.client.apiCall('chat.stopStream', {
-          stream_id: this.streamId,
-        });
+        await this.client.chat.delete({ channel: this.channel, ts });
+      } catch {
+        // Best effort
+      }
+    }
+    if (this.streamer) {
+      try {
+        await this.streamer.stop();
       } catch (err) {
-        console.error(`[native-stream] Failed to stop stream:`, err);
+        console.error('[native-stream] Failed to stop stream:', err);
       }
     }
   }
@@ -477,7 +466,25 @@ async function processStreamNative(
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
 ): Promise<void> {
   try {
-    const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs);
+    // Post a draft thinking message for immediate visual feedback while Claude processes
+    let thinkingTs: string | undefined;
+    try {
+      const res = await client.chat.postMessage({
+        channel: queued.channelId,
+        thread_ts: queued.threadTs,
+        text: ':thinking_face: _thinking..._',
+      });
+      thinkingTs = res.ts ?? undefined;
+    } catch {
+      // Non-critical — proceed without thinking preview
+    }
+
+    const responder = new NativeStreamingResponder(
+      client,
+      queued.channelId,
+      queued.threadTs,
+      thinkingTs,
+    );
 
     const result = await runClaudeStreaming({
       message: queued.text,
@@ -611,7 +618,24 @@ async function processPersistent(
   } else {
     // stream-native
     try {
-      const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs);
+      let thinkingTs: string | undefined;
+      try {
+        const res = await client.chat.postMessage({
+          channel: queued.channelId,
+          thread_ts: queued.threadTs,
+          text: ':thinking_face: _thinking..._',
+        });
+        thinkingTs = res.ts ?? undefined;
+      } catch {
+        // Non-critical
+      }
+
+      const responder = new NativeStreamingResponder(
+        client,
+        queued.channelId,
+        queued.threadTs,
+        thinkingTs,
+      );
 
       const result = await runClaudePersistentStreaming({
         message: queued.text,

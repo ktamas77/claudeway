@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0] - 2026-02-23
+
+### Changed
+- **`stream-native` mode uses typed SDK `chatStream()`**: Replaced raw `apiCall('chat.startStream/appendStream/stopStream')` with the `@slack/web-api` `ChatStreamer` SDK class. Responses are now sent as `markdown_text` so Slack renders native Markdown — no mrkdwn conversion needed.
+- **Thinking preview for `stream-native`**: A `:thinking_face: thinking...` placeholder message is posted immediately before Claude starts processing. It's deleted as soon as the first text delta arrives, replaced by the live stream.
+- **Faster `stream-update` flush interval**: Reduced from 1000ms to 500ms for snappier real-time updates.
+
 ## [0.8.0] - 2026-02-23
 
 ### Added

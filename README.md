@@ -177,8 +177,8 @@ Set `responseMode` in `defaults` or per channel:
 | Mode | Description |
 |------|-------------|
 | `batch` | Wait for the full response, then post it. Default, most reliable. |
-| `stream-update` | Post a message immediately, then update it every ~1 second as text arrives. Uses `chat.update`. Recommended streaming mode. |
-| `stream-native` | Use Slack's native streaming API (`chat.startStream`/`appendStream`/`stopStream`). Requires Enterprise Grid or `recipient_team_id` — will not work on standard Slack workspaces. |
+| `stream-update` | Post a message immediately, then update it every ~500ms as text arrives. Uses `chat.update`. Recommended streaming mode. |
+| `stream-native` | Use Slack's native streaming API via the typed SDK `ChatStreamer`. Sends `markdown_text` so Slack renders native Markdown. Shows a `:thinking_face:` placeholder until the first token arrives. Requires Enterprise Grid or `recipient_team_id` — will not work on standard Slack workspaces. |
 
 Streaming modes give real-time feedback for long responses instead of showing an hourglass for 30+ seconds. If the final response exceeds the file upload threshold (12KB), streaming modes automatically fall back to uploading a file.
 
