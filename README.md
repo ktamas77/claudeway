@@ -14,11 +14,12 @@ You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> resp
 
 ## How It Works
 
-1. You send a message in a configured Slack channel
-2. Claudeway spawns `claude -p` in the mapped project folder, resuming the existing session if one exists
-3. Claude Code reads your codebase, runs tools, and produces a response
+1. You send a message (with optional image attachments) in a configured Slack channel
+2. Claudeway downloads any attached images to a temp directory and spawns `claude -p` in the mapped project folder, resuming the existing session if one exists
+3. Claude Code reads your codebase, analyzes any attached images, runs tools, and produces a response
 4. The response is posted back as a threaded reply in Slack
 5. Reactions show status: hourglass (processing), checkmark (done), X (error)
+6. Temp image files are cleaned up after processing
 
 Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + folder pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.
 
@@ -42,6 +43,7 @@ Claude Code edits `config.json` directly, and changes take effect on the next me
    - `chat:write`
    - `channels:history`
    - `channels:read`
+   - `files:read` (for image attachments)
    - `reactions:write`
 4. **Subscribe to Bot Events** (Event Subscriptions):
    - `message.channels`
@@ -76,7 +78,7 @@ Create `config.json`:
   "defaults": {
     "model": "opus",
     "systemPrompt": "Format all responses using Slack mrkdwn syntax (NOT standard Markdown). Key rules: *bold* (single asterisk), _italic_ (underscore), ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag), > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes. Keep responses concise. You have access to the Claudeway config at CONFIG_PATH which you can read and edit when asked to add, remove, or update channel mappings.",
-    "timeoutMs": 300000,
+    "timeoutMs": 1800000,
     "responseMode": "batch"
   }
 }
@@ -152,7 +154,7 @@ Set `systemChannel` to the ID of one of your configured channels. Claudeway will
 | `folder` | Project folder path | required |
 | `model` | Claude model (`opus`, `sonnet`) | from defaults |
 | `systemPrompt` | Custom system prompt | from defaults |
-| `timeoutMs` | CLI timeout in ms | 300000 (5 min) |
+| `timeoutMs` | Idle timeout in ms (resets on activity) | 1800000 (30 min) |
 | `responseMode` | How responses are delivered (see below) | from defaults |
 
 ### Response Modes
@@ -169,6 +171,8 @@ Streaming modes give real-time feedback for long responses instead of showing an
 
 ## Troubleshooting
 
+**Process killed too early:** The `timeoutMs` setting is an idle timeout — it only kills the process after that many milliseconds of inactivity (no stdout/stderr). There's also a hard 12-hour absolute safety net. Increase `timeoutMs` per channel for long-running tasks.
+
 **Claude hangs / no response:** Make sure stdin is not piped to the Claude process. Claudeway handles this internally by using `stdio: ['ignore', 'pipe', 'pipe']` when spawning the CLI.
 
 **"Session ID already in use":** This happens when a previous Claude session didn't exit cleanly. Claudeway automatically clears stale session artifacts and retries once. No manual intervention needed.
@@ -178,6 +182,8 @@ Streaming modes give real-time feedback for long responses instead of showing an
 **"Cannot be launched inside another Claude Code session":** Don't start Claudeway from within a Claude Code terminal. The `CLAUDECODE` env var is inherited and blocks nested sessions. Start from a regular terminal or use the LaunchAgent.
 
 **Only one instance runs at a time:** Claudeway uses a pidfile lock (`claudeway.pid`). If the service crashes, the stale pidfile is detected and cleaned up automatically.
+
+**Images not being analyzed:** Make sure your Slack app has the `files:read` bot token scope. Supported formats: PNG, JPEG, GIF, WebP (max 5MB per image). Non-image files (PDFs, zips) are silently ignored.
 
 ## Pairs Well With
 

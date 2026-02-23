@@ -11,6 +11,7 @@ export interface ClaudeOptions {
   systemPrompt: string;
   timeoutMs: number;
   channelId: string;
+  imagePaths?: string[];
 }
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
@@ -25,6 +26,9 @@ export interface ClaudeResult {
 
 // Claudeway namespace UUID for deterministic session IDs
 const CLAUDEWAY_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+// Absolute maximum runtime — safety net regardless of activity
+const ABSOLUTE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 /**
  * Generate a deterministic session UUID from channel ID + folder path.
@@ -53,21 +57,37 @@ function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promi
     let stdout = '';
     let stderr = '';
 
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        proc.kill('SIGTERM');
+        reject(new Error(`Claude idle timeout after ${timeoutMs / 1000}s of inactivity`));
+      }, timeoutMs);
+    };
+
     proc.stdout.on('data', (data: Buffer) => {
       stdout += data.toString();
+      resetTimer();
     });
 
     proc.stderr.on('data', (data: Buffer) => {
       stderr += data.toString();
+      resetTimer();
     });
 
-    const timer = setTimeout(() => {
+    let timer = setTimeout(() => {
       proc.kill('SIGTERM');
-      reject(new Error(`Claude timed out after ${timeoutMs / 1000}s`));
+      reject(new Error(`Claude idle timeout after ${timeoutMs / 1000}s of inactivity`));
     }, timeoutMs);
+
+    const absoluteTimer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`Claude absolute timeout after ${ABSOLUTE_TIMEOUT_MS / 3600000}h`));
+    }, ABSOLUTE_TIMEOUT_MS);
 
     proc.on('close', (code) => {
       clearTimeout(timer);
+      clearTimeout(absoluteTimer);
 
       if (code !== 0) {
         reject(new Error(`Claude exited with code ${code}: ${stderr.trim()}`));
@@ -92,6 +112,7 @@ function runClaudeProcess(args: string[], cwd: string, timeoutMs: number): Promi
 
     proc.on('error', (err) => {
       clearTimeout(timer);
+      clearTimeout(absoluteTimer);
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
   });
@@ -143,6 +164,14 @@ function runClaudeStreamingProcess(
       }
     }
 
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        proc.kill('SIGTERM');
+        reject(new Error(`Claude idle timeout after ${timeoutMs / 1000}s of inactivity`));
+      }, timeoutMs);
+    };
+
     proc.stdout.on('data', (data: Buffer) => {
       lineBuffer += data.toString();
       const lines = lineBuffer.split('\n');
@@ -151,19 +180,27 @@ function runClaudeStreamingProcess(
       for (const line of lines) {
         processLine(line);
       }
+      resetTimer();
     });
 
     proc.stderr.on('data', (data: Buffer) => {
       stderr += data.toString();
+      resetTimer();
     });
 
-    const timer = setTimeout(() => {
+    let timer = setTimeout(() => {
       proc.kill('SIGTERM');
-      reject(new Error(`Claude timed out after ${timeoutMs / 1000}s`));
+      reject(new Error(`Claude idle timeout after ${timeoutMs / 1000}s of inactivity`));
     }, timeoutMs);
+
+    const absoluteTimer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`Claude absolute timeout after ${ABSOLUTE_TIMEOUT_MS / 3600000}h`));
+    }, ABSOLUTE_TIMEOUT_MS);
 
     proc.on('close', (code) => {
       clearTimeout(timer);
+      clearTimeout(absoluteTimer);
       // Process any remaining buffered line
       if (lineBuffer.trim()) {
         processLine(lineBuffer);
@@ -183,6 +220,7 @@ function runClaudeStreamingProcess(
 
     proc.on('error', (err) => {
       clearTimeout(timer);
+      clearTimeout(absoluteTimer);
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
   });
@@ -254,7 +292,15 @@ function buildClaudeArgs(
     args.push('--mcp-config', mcpConfigPath);
   }
 
-  args.push(message);
+  // If images are attached, append file path references so Claude reads them
+  if (options.imagePaths && options.imagePaths.length > 0) {
+    const imageRefs = options.imagePaths.map((p) => p).join('\n');
+    args.push(
+      message + '\n\n[Attached image files — use your Read tool to view them]\n' + imageRefs,
+    );
+  } else {
+    args.push(message);
+  }
 
   return { args, sessionId, cwd, resuming };
 }

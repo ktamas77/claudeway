@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0] - 2026-02-23
+
+### Added
+- **Idle-based timeout**: Process timeout now resets on any stdout/stderr activity, so long-running tasks that are actively working won't be killed
+- **Absolute timeout safety net**: Hard 12-hour maximum runtime regardless of activity
+- **Atomic config save**: `saveConfig()` now writes to a temp file, validates JSON, then atomically renames to prevent corrupt config
+
+### Changed
+- Default `timeoutMs` now represents idle timeout (inactivity) rather than absolute elapsed time
+
+## [0.3.0] - 2025-02-23
+
+### Added
+- **Image attachment support**: Attach PNG, JPEG, GIF, or WebP images in Slack and Claude will analyze them
+  - Images downloaded from Slack using bot token auth, saved to temp directory
+  - Image-only messages auto-prompt "What is in this image?"
+  - Text + image messages pass both to Claude
+  - Temp files automatically cleaned up after processing
+  - 5MB per-image size limit
+- Requires `files:read` Slack bot token scope
+
 ## [0.2.0] - 2025-02-22
 
 ### Added

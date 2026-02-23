@@ -1,8 +1,19 @@
 import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
+import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { loadConfig, resolvedChannelConfig, type ResponseMode } from './config.js';
 import { runClaude, runClaudeStreaming } from './claude.js';
 import { enqueue, dequeue, getPendingForChannel, type QueuedMessage } from './queue.js';
+
+interface SlackFile {
+  id: string;
+  name: string;
+  mimetype: string;
+  size: number;
+  url_private_download?: string;
+}
 
 interface SlackMessage {
   text?: string;
@@ -12,6 +23,52 @@ interface SlackMessage {
   thread_ts?: string;
   subtype?: string;
   bot_id?: string;
+  files?: SlackFile[];
+}
+
+const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const IMAGE_SIZE_LIMIT = 5 * 1024 * 1024; // 5MB
+const IMAGE_TEMP_DIR = join(tmpdir(), 'claudeway-images');
+
+async function downloadSlackImages(files: SlackFile[], token: string): Promise<string[]> {
+  const imageFiles = files.filter(
+    (f) =>
+      f.url_private_download && SUPPORTED_IMAGE_TYPES.has(f.mimetype) && f.size <= IMAGE_SIZE_LIMIT,
+  );
+  if (imageFiles.length === 0) return [];
+
+  mkdirSync(IMAGE_TEMP_DIR, { recursive: true });
+
+  const paths: string[] = [];
+  for (const file of imageFiles) {
+    try {
+      const res = await fetch(file.url_private_download!, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        console.error(`[images] Failed to download ${file.name}: HTTP ${res.status}`);
+        continue;
+      }
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const localPath = join(IMAGE_TEMP_DIR, `${file.id}-${file.name}`);
+      writeFileSync(localPath, buffer);
+      paths.push(localPath);
+      console.log(`[images] Downloaded ${file.name} (${(file.size / 1024).toFixed(1)}KB)`);
+    } catch (err) {
+      console.error(`[images] Failed to download ${file.name}:`, err);
+    }
+  }
+  return paths;
+}
+
+function cleanupImages(paths: string[]): void {
+  for (const p of paths) {
+    try {
+      unlinkSync(p);
+    } catch {
+      // Already removed
+    }
+  }
 }
 
 const MAX_MESSAGE_LENGTH = 3900;
@@ -76,7 +133,9 @@ class StreamingResponder {
   }
 
   private async flush(): Promise<void> {
-    if (this.fullText.length === 0 || this.fullText.length === this.lastUpdateLen) return;
+    if (this.fullText.length === 0) return;
+    // Skip if no new text — unless finished, where we must update to remove the indicator
+    if (!this.finished && this.fullText.length === this.lastUpdateLen) return;
 
     const displayText = markdownToSlackMrkdwn(this.fullText);
     // Truncate for Slack's single-message limit, append indicator if still streaming
@@ -282,22 +341,27 @@ async function processBatch(
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
 ): Promise<void> {
-  const result = await runClaude({
-    message: queued.text,
-    cwd: channelConfig.folder,
-    model: channelConfig.model,
-    systemPrompt: channelConfig.systemPrompt,
-    timeoutMs: channelConfig.timeoutMs,
-    channelId: queued.channelId,
-  });
+  try {
+    const result = await runClaude({
+      message: queued.text,
+      cwd: channelConfig.folder,
+      model: channelConfig.model,
+      systemPrompt: channelConfig.systemPrompt,
+      timeoutMs: channelConfig.timeoutMs,
+      channelId: queued.channelId,
+      imagePaths: queued.imagePaths,
+    });
 
-  await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
-  await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
 
-  await sendResponse(client, queued.channelId, queued.threadTs, result.response);
+    await sendResponse(client, queued.channelId, queued.threadTs, result.response);
 
-  if (result.cost !== null) {
-    console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+    if (result.cost !== null) {
+      console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+    }
+  } finally {
+    if (queued.imagePaths) cleanupImages(queued.imagePaths);
   }
 }
 
@@ -306,71 +370,76 @@ async function processStreamUpdate(
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
 ): Promise<void> {
-  const responder = new StreamingResponder(client, queued.channelId, queued.threadTs);
+  try {
+    const responder = new StreamingResponder(client, queued.channelId, queued.threadTs);
 
-  const result = await runClaudeStreaming({
-    message: queued.text,
-    cwd: channelConfig.folder,
-    model: channelConfig.model,
-    systemPrompt: channelConfig.systemPrompt,
-    timeoutMs: channelConfig.timeoutMs,
-    channelId: queued.channelId,
-    onTextDelta: (text) => responder.onTextDelta(text),
-  });
-
-  await responder.finish();
-
-  await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
-  await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
-
-  // If final response exceeds file threshold, upload as file and delete the streamed message
-  const finalText = result.response || responder.getFullText();
-  if (finalText.length > FILE_THRESHOLD) {
-    // Delete the streamed message and upload as file instead
-    const msgTs = responder.getMessageTs();
-    if (msgTs) {
-      try {
-        await client.chat.delete({ channel: queued.channelId, ts: msgTs });
-      } catch {
-        // Best effort — may lack permission
-      }
-    }
-    await client.files.uploadV2({
-      channel_id: queued.channelId,
-      thread_ts: queued.threadTs,
-      content: finalText,
-      filename: 'response.md',
-      title: 'Response',
+    const result = await runClaudeStreaming({
+      message: queued.text,
+      cwd: channelConfig.folder,
+      model: channelConfig.model,
+      systemPrompt: channelConfig.systemPrompt,
+      timeoutMs: channelConfig.timeoutMs,
+      channelId: queued.channelId,
+      imagePaths: queued.imagePaths,
+      onTextDelta: (text) => responder.onTextDelta(text),
     });
-  } else if (finalText.length > MAX_MESSAGE_LENGTH) {
-    // Final text fits in messages but was truncated during streaming — do a final complete send
-    const formatted = markdownToSlackMrkdwn(finalText);
-    const chunks = splitMessage(formatted);
-    // Update the existing message with the first chunk
-    const msgTs = responder.getMessageTs();
-    if (msgTs && chunks.length > 0) {
-      try {
-        await client.chat.update({
-          channel: queued.channelId,
-          ts: msgTs,
-          text: chunks[0],
-        });
-      } catch {
-        // Fall through to post
+
+    await responder.finish();
+
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+
+    // If final response exceeds file threshold, upload as file and delete the streamed message
+    const finalText = result.response || responder.getFullText();
+    if (finalText.length > FILE_THRESHOLD) {
+      // Delete the streamed message and upload as file instead
+      const msgTs = responder.getMessageTs();
+      if (msgTs) {
+        try {
+          await client.chat.delete({ channel: queued.channelId, ts: msgTs });
+        } catch {
+          // Best effort — may lack permission
+        }
       }
-      // Post remaining chunks as follow-up messages
-      for (let i = 1; i < chunks.length; i++) {
-        await client.chat.postMessage({
-          channel: queued.channelId,
-          thread_ts: queued.threadTs,
-          text: chunks[i],
-        });
+      await client.files.uploadV2({
+        channel_id: queued.channelId,
+        thread_ts: queued.threadTs,
+        content: finalText,
+        filename: 'response.md',
+        title: 'Response',
+      });
+    } else if (finalText.length > MAX_MESSAGE_LENGTH) {
+      // Final text fits in messages but was truncated during streaming — do a final complete send
+      const formatted = markdownToSlackMrkdwn(finalText);
+      const chunks = splitMessage(formatted);
+      // Update the existing message with the first chunk
+      const msgTs = responder.getMessageTs();
+      if (msgTs && chunks.length > 0) {
+        try {
+          await client.chat.update({
+            channel: queued.channelId,
+            ts: msgTs,
+            text: chunks[0],
+          });
+        } catch {
+          // Fall through to post
+        }
+        // Post remaining chunks as follow-up messages
+        for (let i = 1; i < chunks.length; i++) {
+          await client.chat.postMessage({
+            channel: queued.channelId,
+            thread_ts: queued.threadTs,
+            text: chunks[i],
+          });
+        }
       }
     }
-  }
 
-  if (result.cost !== null) {
-    console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+    if (result.cost !== null) {
+      console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+    }
+  } finally {
+    if (queued.imagePaths) cleanupImages(queued.imagePaths);
   }
 }
 
@@ -379,37 +448,42 @@ async function processStreamNative(
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
 ): Promise<void> {
-  const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs);
+  try {
+    const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs);
 
-  const result = await runClaudeStreaming({
-    message: queued.text,
-    cwd: channelConfig.folder,
-    model: channelConfig.model,
-    systemPrompt: channelConfig.systemPrompt,
-    timeoutMs: channelConfig.timeoutMs,
-    channelId: queued.channelId,
-    onTextDelta: (text) => responder.onTextDelta(text),
-  });
-
-  await responder.finish();
-
-  await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
-  await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
-
-  // Native streaming handles display automatically; fall back to file upload for huge responses
-  const finalText = result.response || responder.getFullText();
-  if (finalText.length > FILE_THRESHOLD) {
-    await client.files.uploadV2({
-      channel_id: queued.channelId,
-      thread_ts: queued.threadTs,
-      content: finalText,
-      filename: 'response.md',
-      title: 'Response',
+    const result = await runClaudeStreaming({
+      message: queued.text,
+      cwd: channelConfig.folder,
+      model: channelConfig.model,
+      systemPrompt: channelConfig.systemPrompt,
+      timeoutMs: channelConfig.timeoutMs,
+      channelId: queued.channelId,
+      imagePaths: queued.imagePaths,
+      onTextDelta: (text) => responder.onTextDelta(text),
     });
-  }
 
-  if (result.cost !== null) {
-    console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+    await responder.finish();
+
+    await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
+    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+
+    // Native streaming handles display automatically; fall back to file upload for huge responses
+    const finalText = result.response || responder.getFullText();
+    if (finalText.length > FILE_THRESHOLD) {
+      await client.files.uploadV2({
+        channel_id: queued.channelId,
+        thread_ts: queued.threadTs,
+        content: finalText,
+        filename: 'response.md',
+        title: 'Response',
+      });
+    }
+
+    if (result.cost !== null) {
+      console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
+    }
+  } finally {
+    if (queued.imagePaths) cleanupImages(queued.imagePaths);
   }
 }
 
@@ -486,12 +560,20 @@ async function drainChannel(channelId: string, client: WebClient): Promise<void>
 }
 
 export function registerMessageHandler(app: App): void {
-  app.message(async ({ message, client }) => {
+  app.message(async ({ message, client, context }) => {
     const msg = message as SlackMessage;
 
-    // Ignore bot messages and message edits
-    if (msg.subtype || msg.bot_id) return;
-    if (!msg.text) return;
+    // Ignore bot messages and message edits (allow file_share for image attachments)
+    if (msg.bot_id) return;
+    if (msg.subtype && msg.subtype !== 'file_share') return;
+
+    const hasText = !!msg.text;
+    const hasImages = !!(
+      msg.files &&
+      msg.files.some((f) => f.url_private_download && SUPPORTED_IMAGE_TYPES.has(f.mimetype))
+    );
+    // Require at least text or images
+    if (!hasText && !hasImages) return;
 
     // Quick config check
     try {
@@ -501,16 +583,25 @@ export function registerMessageHandler(app: App): void {
       return;
     }
 
+    // Download image attachments before enqueueing
+    let imagePaths: string[] = [];
+    if (hasImages && msg.files) {
+      const token = context.botToken ?? process.env.SLACK_BOT_TOKEN ?? '';
+      imagePaths = await downloadSlackImages(msg.files, token);
+    }
+
     const threadTs = msg.thread_ts ?? msg.ts;
+    const text = msg.text || (imagePaths.length > 0 ? 'What is in this image?' : '');
 
     // Persist to queue
     enqueue({
       channelId: msg.channel,
       userId: msg.user ?? 'unknown',
-      text: msg.text,
+      text,
       ts: msg.ts,
       threadTs,
       queuedAt: new Date().toISOString(),
+      ...(imagePaths.length > 0 ? { imagePaths } : {}),
     });
 
     if (channelBusy.has(msg.channel)) {
