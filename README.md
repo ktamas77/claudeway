@@ -76,7 +76,8 @@ Create `config.json`:
   "defaults": {
     "model": "opus",
     "systemPrompt": "Format all responses using Slack mrkdwn syntax (NOT standard Markdown). Key rules: *bold* (single asterisk), _italic_ (underscore), ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag), > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes. Keep responses concise. You have access to the Claudeway config at CONFIG_PATH which you can read and edit when asked to add, remove, or update channel mappings.",
-    "timeoutMs": 300000
+    "timeoutMs": 300000,
+    "responseMode": "batch"
   }
 }
 ```
