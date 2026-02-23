@@ -46,7 +46,7 @@ function markdownToSlackMrkdwn(text: string): string {
   return result;
 }
 
-const STREAM_UPDATE_INTERVAL_MS = 2000;
+const STREAM_UPDATE_INTERVAL_MS = 1000;
 const STREAMING_INDICATOR = ' :writing_hand:';
 
 class StreamingResponder {
