@@ -535,8 +535,8 @@ async function processPersistent(
         onTextDelta: () => {},
       });
 
-      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
       await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
       await sendResponse(client, queued.channelId, queued.threadTs, result.response);
 
       if (result.cost !== null) {
@@ -561,8 +561,8 @@ async function processPersistent(
       });
 
       await responder.finish();
-      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
       await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
       const finalText = result.response || responder.getFullText();
       if (finalText.length > FILE_THRESHOLD) {
@@ -624,8 +624,8 @@ async function processPersistent(
       });
 
       await responder.finish();
-      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
       await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+      await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
       const finalText = result.response || responder.getFullText();
       if (finalText.length > FILE_THRESHOLD) {
