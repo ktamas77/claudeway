@@ -1,0 +1,13 @@
+{
+  "channels": {
+    "C0123456789": {
+      "name": "my-project",
+      "folder": "/path/to/your/project"
+    }
+  },
+  "defaults": {
+    "model": "opus",
+    "systemPrompt": "Be concise. Format responses for Slack mrkdwn.",
+    "timeoutMs": 300000
+  }
+}
