@@ -171,6 +171,8 @@ Streaming modes give real-time feedback for long responses instead of showing an
 
 ## Troubleshooting
 
+**Messages queuing unexpectedly:** There's a global limit of 8 concurrent Claude CLI processes. If all slots are busy, new messages wait in queue until a slot frees up. Each channel also serializes its own messages (one at a time per channel).
+
 **Process killed too early:** The `timeoutMs` setting is an idle timeout — it only kills the process after that many milliseconds of inactivity (no stdout/stderr). There's also a hard 12-hour absolute safety net. Increase `timeoutMs` per channel for long-running tasks.
 
 **Claude hangs / no response:** Make sure stdin is not piped to the Claude process. Claudeway handles this internally by using `stdio: ['ignore', 'pipe', 'pipe']` when spawning the CLI.

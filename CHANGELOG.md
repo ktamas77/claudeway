@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.1] - 2026-02-23
+
+### Added
+- **Global concurrency limit**: Max 8 Claude CLI processes running simultaneously across all channels. Additional messages queue and wait for a slot.
+
 ## [0.4.0] - 2026-02-23
 
 ### Added

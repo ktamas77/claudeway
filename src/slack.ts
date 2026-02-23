@@ -270,6 +270,26 @@ class NativeStreamingResponder {
 // Per-channel processing lock — one message at a time per channel
 const channelBusy = new Set<string>();
 
+// Global concurrency limit for Claude CLI processes
+const MAX_CONCURRENT_PROCESSES = 8;
+let activeProcesses = 0;
+const concurrencyWaiters: (() => void)[] = [];
+
+async function acquireProcessSlot(): Promise<void> {
+  if (activeProcesses < MAX_CONCURRENT_PROCESSES) {
+    activeProcesses++;
+    return;
+  }
+  await new Promise<void>((resolve) => concurrencyWaiters.push(resolve));
+  activeProcesses++;
+}
+
+function releaseProcessSlot(): void {
+  activeProcesses--;
+  const next = concurrencyWaiters.shift();
+  if (next) next();
+}
+
 function splitMessage(text: string): string[] {
   const chunks: string[] = [];
   let remaining = text;
@@ -519,6 +539,15 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
   await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand');
 
   const mode = channelConfig.responseMode;
+
+  // Wait for a process slot if at global concurrency limit
+  if (activeProcesses >= MAX_CONCURRENT_PROCESSES) {
+    console.log(
+      `[${channelConfig.name}] Waiting for process slot (${activeProcesses}/${MAX_CONCURRENT_PROCESSES} active)`,
+    );
+  }
+  await acquireProcessSlot();
+
   console.log(`[${channelConfig.name}] Processing (${mode}): ${queued.text.substring(0, 80)}...`);
 
   try {
@@ -543,6 +572,7 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
 
   // Remove from persistent queue after processing (success or error)
   dequeue(queued.channelId, queued.ts);
+  releaseProcessSlot();
 }
 
 async function drainChannel(channelId: string, client: WebClient): Promise<void> {
