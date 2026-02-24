@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.0] - 2026-02-23
+
+### Added
+- **Message delete detection**: Deleting a queued Slack message (📥) automatically removes it from the processing queue. If a message is already being processed (⏳), deletion has no effect — use `!kill` to interrupt in-flight processing.
+
 ## [0.10.0] - 2026-02-23
 
 ### Changed

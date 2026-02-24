@@ -18,7 +18,7 @@ You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> resp
 2. Claudeway downloads any attached images to a temp directory, then either spawns a fresh `claude -p` process or pipes the message into a long-lived persistent process — depending on `processMode`
 3. Claude Code reads your codebase, analyzes any attached images, runs tools, and produces a response
 4. The response is posted back as a threaded reply in Slack
-5. Reactions show status: `📥` (queued/received), ⏳ (processing), ✅ (done), ❌ (error)
+5. Reactions show status: `📥` (queued/received), ⏳ (processing), ✅ (done), ❌ (error). Deleting a queued message (📥) removes it from the queue — if it's already processing (⏳), use `!kill` instead.
 6. Temp image files are cleaned up after processing
 
 Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + folder pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.

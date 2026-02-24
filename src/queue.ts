@@ -27,12 +27,13 @@ export function enqueue(msg: QueuedMessage): void {
   writeFileSync(file, JSON.stringify(msg, null, 2), 'utf-8');
 }
 
-export function dequeue(channelId: string, ts: string): void {
+export function dequeue(channelId: string, ts: string): boolean {
   const file = messageFile(channelId, ts);
   try {
     unlinkSync(file);
+    return true;
   } catch {
-    // Already removed
+    return false;
   }
 }
 

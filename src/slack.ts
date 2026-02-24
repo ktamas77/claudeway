@@ -33,6 +33,7 @@ interface SlackMessage {
   subtype?: string;
   bot_id?: string;
   files?: SlackFile[];
+  deleted_ts?: string;
 }
 
 const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -1055,7 +1056,18 @@ export function registerMessageHandler(app: App): void {
 
     // Ignore bot messages and message edits (allow file_share for image attachments)
     if (msg.bot_id) return;
-    if (msg.subtype && msg.subtype !== 'file_share') return;
+    if (msg.subtype && msg.subtype !== 'file_share' && msg.subtype !== 'message_deleted') return;
+
+    // Handle message deletions — remove from queue if still pending
+    if (msg.subtype === 'message_deleted' && msg.deleted_ts) {
+      const removed = dequeue(msg.channel, msg.deleted_ts);
+      if (removed) {
+        console.log(
+          `[${msg.channel}] Message deleted from Slack — removed from queue: ${msg.deleted_ts}`,
+        );
+      }
+      return;
+    }
 
     // Handle magic commands (!ps, !kill, !killall) — bypass queue and Claude processing
     if (
