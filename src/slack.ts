@@ -14,7 +14,14 @@ import {
   killAllProcesses,
   nudgeProcess,
 } from './claude.js';
-import { enqueue, dequeue, getPendingForChannel, getPending, type QueuedMessage } from './queue.js';
+import {
+  enqueue,
+  dequeue,
+  updateQueuedText,
+  getPendingForChannel,
+  getPending,
+  type QueuedMessage,
+} from './queue.js';
 
 interface SlackFile {
   id: string;
@@ -34,6 +41,7 @@ interface SlackMessage {
   bot_id?: string;
   files?: SlackFile[];
   deleted_ts?: string;
+  message?: { ts?: string; text?: string };
 }
 
 const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -300,6 +308,10 @@ class NativeStreamingResponder {
 
 // Per-channel processing lock — one message at a time per channel
 const channelBusy = new Set<string>();
+
+// Messages currently being processed (file still on disk but data already in memory)
+const processingMessages = new Set<string>();
+const processingKey = (channelId: string, ts: string) => `${channelId}_${ts}`;
 
 // Global concurrency limit for Claude CLI processes
 const MAX_CONCURRENT_PROCESSES = 8;
@@ -735,6 +747,7 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
     return;
   }
 
+  processingMessages.add(processingKey(queued.channelId, queued.ts));
   await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand');
   await safeReact(client, queued.channelId, queued.ts, 'inbox_tray', 'remove');
 
@@ -779,6 +792,7 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
 
   // Remove from persistent queue after processing (success or error)
   dequeue(queued.channelId, queued.ts);
+  processingMessages.delete(processingKey(queued.channelId, queued.ts));
   releaseProcessSlot();
 }
 
@@ -1056,7 +1070,13 @@ export function registerMessageHandler(app: App): void {
 
     // Ignore bot messages and message edits (allow file_share for image attachments)
     if (msg.bot_id) return;
-    if (msg.subtype && msg.subtype !== 'file_share' && msg.subtype !== 'message_deleted') return;
+    if (
+      msg.subtype &&
+      msg.subtype !== 'file_share' &&
+      msg.subtype !== 'message_deleted' &&
+      msg.subtype !== 'message_changed'
+    )
+      return;
 
     // Handle message deletions — remove from queue if still pending
     if (msg.subtype === 'message_deleted' && msg.deleted_ts) {
@@ -1065,6 +1085,18 @@ export function registerMessageHandler(app: App): void {
         console.log(
           `[${msg.channel}] Message deleted from Slack — removed from queue: ${msg.deleted_ts}`,
         );
+      }
+      return;
+    }
+
+    // Handle message edits — update queue content if still pending (not yet processing)
+    if (msg.subtype === 'message_changed' && msg.message?.ts && msg.message?.text) {
+      const origTs = msg.message.ts;
+      if (!processingMessages.has(processingKey(msg.channel, origTs))) {
+        const updated = updateQueuedText(msg.channel, origTs, msg.message.text);
+        if (updated) {
+          console.log(`[${msg.channel}] Queued message edited — updated in queue: ${origTs}`);
+        }
       }
       return;
     }

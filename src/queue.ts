@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync, existsSync } from 'fs';
 import { resolve, join } from 'path';
 
 export interface QueuedMessage {
@@ -52,6 +52,19 @@ export function getPending(): QueuedMessage[] {
       .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
   } catch {
     return [];
+  }
+}
+
+export function updateQueuedText(channelId: string, ts: string, newText: string): boolean {
+  const file = messageFile(channelId, ts);
+  if (!existsSync(file)) return false;
+  try {
+    const existing = JSON.parse(readFileSync(file, 'utf-8')) as QueuedMessage;
+    existing.text = newText;
+    writeFileSync(file, JSON.stringify(existing, null, 2), 'utf-8');
+    return true;
+  } catch {
+    return false;
   }
 }
 

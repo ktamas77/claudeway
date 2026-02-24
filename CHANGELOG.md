@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.12.0] - 2026-02-23
+
+### Added
+- **Message edit detection**: Editing a queued Slack message (📥) updates the queue content with the new text before it's processed. If the message is already being processed (⏳), the edit is ignored — the in-flight request uses the original text.
+
 ## [0.11.0] - 2026-02-23
 
 ### Added
