@@ -31,7 +31,7 @@ Dedicate one Slack channel to Claudeway itself (mapped to the claudeway folder).
 - "Remove the dashboard channel"
 - "Change the model for #api to sonnet"
 
-Claude Code edits `config.json` directly, and changes take effect on the next message.
+Claude Code edits the config file directly (JSON or YAML), and changes take effect on the next message.
 
 ## Setup
 
@@ -65,7 +65,8 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-level-token
 ```
 
-Create `config.json`:
+Create `config.json` or `config.yaml` (YAML is recommended for readability — see [`config.example.yaml`](config.example.yaml)). If both exist, YAML takes priority.
+
 ```json
 {
   "systemChannel": "C0123456789",

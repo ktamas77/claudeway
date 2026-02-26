@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 config.json
+config.yaml
 mcp.json
 *.tsbuildinfo
 *.log

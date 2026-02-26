@@ -1,4 +1,13 @@
-import { resolvedChannelConfig, getChannelConfig, type Config } from '../config.js';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import {
+  resolvedChannelConfig,
+  getChannelConfig,
+  loadConfig,
+  saveConfig,
+  type Config,
+} from '../config.js';
 
 const baseConfig: Config = {
   channels: {
@@ -77,5 +86,95 @@ describe('getChannelConfig', () => {
 
   it('returns null for an unknown channel', () => {
     expect(getChannelConfig(baseConfig, 'C999')).toBeNull();
+  });
+});
+
+describe('YAML config support', () => {
+  let tmpDir: string;
+  const originalCwd = process.cwd;
+
+  const minimalConfig = {
+    channels: { C001: { name: 'test', folder: '/test' } },
+    defaults: {
+      model: 'opus',
+      systemPrompt: 'test prompt',
+      timeoutMs: 300000,
+      responseMode: 'batch',
+    },
+  };
+
+  const minimalYaml = `
+channels:
+  C002:
+    name: from-yaml
+    folder: /yaml
+defaults:
+  model: opus
+  systemPrompt: yaml prompt
+  timeoutMs: 300000
+  responseMode: batch
+`;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'claudeway-config-test-'));
+    process.cwd = () => tmpDir;
+  });
+
+  afterEach(() => {
+    process.cwd = originalCwd;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('loads config.json when only JSON exists', () => {
+    writeFileSync(join(tmpDir, 'config.json'), JSON.stringify(minimalConfig));
+    const config = loadConfig();
+    expect(config.channels.C001.name).toBe('test');
+  });
+
+  it('loads config.yaml when only YAML exists', () => {
+    writeFileSync(join(tmpDir, 'config.yaml'), minimalYaml);
+    const config = loadConfig();
+    expect(config.channels.C002.name).toBe('from-yaml');
+  });
+
+  it('prefers config.yaml over config.json when both exist', () => {
+    writeFileSync(join(tmpDir, 'config.yaml'), minimalYaml);
+    writeFileSync(join(tmpDir, 'config.json'), JSON.stringify(minimalConfig));
+    const config = loadConfig();
+    expect(config.channels.C002.name).toBe('from-yaml');
+  });
+
+  it('saveConfig writes YAML when config.yaml is active', () => {
+    writeFileSync(join(tmpDir, 'config.yaml'), minimalYaml);
+    const config = loadConfig();
+    config.channels.C002.name = 'updated';
+    saveConfig(config);
+
+    const saved = readFileSync(join(tmpDir, 'config.yaml'), 'utf-8');
+    expect(saved).toContain('updated');
+    expect(existsSync(join(tmpDir, 'config.json'))).toBe(false);
+  });
+
+  it('saveConfig writes JSON when config.json is active', () => {
+    writeFileSync(join(tmpDir, 'config.json'), JSON.stringify(minimalConfig));
+    const config = loadConfig();
+    config.channels.C001.name = 'updated';
+    saveConfig(config);
+
+    const saved = JSON.parse(readFileSync(join(tmpDir, 'config.json'), 'utf-8'));
+    expect(saved.channels.C001.name).toBe('updated');
+  });
+
+  it('applies defaults when loading YAML config', () => {
+    const yamlNoDefaults = `
+channels:
+  C001:
+    name: minimal
+    folder: /min
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yamlNoDefaults);
+    const config = loadConfig();
+    expect(config.defaults.responseMode).toBe('batch');
+    expect(config.defaults.processMode).toBe('oneshot');
   });
 });

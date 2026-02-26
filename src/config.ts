@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, renameSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
 import { resolve } from 'path';
+import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 
 export type ResponseMode = 'batch' | 'stream-update' | 'stream-native';
 export type ProcessMode = 'oneshot' | 'persistent';
@@ -28,18 +29,41 @@ export interface Config {
   systemChannel?: string;
 }
 
-const CONFIG_PATH = resolve(process.cwd(), 'config.json');
+type ConfigFormat = 'yaml' | 'json';
+
+function detectConfigPath(): { path: string; format: ConfigFormat } {
+  const yamlPath = resolve(process.cwd(), 'config.yaml');
+  const jsonPath = resolve(process.cwd(), 'config.json');
+  if (existsSync(yamlPath)) {
+    if (existsSync(jsonPath)) {
+      console.warn('[config] Both config.yaml and config.json exist — using config.yaml');
+    }
+    return { path: yamlPath, format: 'yaml' };
+  }
+  return { path: jsonPath, format: 'json' };
+}
+
+function parseConfig(raw: string, format: ConfigFormat): Config {
+  return format === 'yaml' ? (yamlParse(raw) as Config) : (JSON.parse(raw) as Config);
+}
+
+function serializeConfig(config: Config, format: ConfigFormat): string {
+  return format === 'yaml'
+    ? yamlStringify(config, { lineWidth: 0 })
+    : JSON.stringify(config, null, 2) + '\n';
+}
 
 export function getConfigPath(): string {
-  return CONFIG_PATH;
+  return detectConfigPath().path;
 }
 
 export function loadConfig(): Config {
-  const raw = readFileSync(CONFIG_PATH, 'utf-8');
-  const config = JSON.parse(raw) as Config;
+  const { path: configPath, format } = detectConfigPath();
+  const raw = readFileSync(configPath, 'utf-8');
+  const config = parseConfig(raw, format);
 
   if (!config.channels || typeof config.channels !== 'object') {
-    throw new Error('config.json: "channels" must be an object');
+    throw new Error(`${configPath}: "channels" must be an object`);
   }
   if (!config.defaults) {
     config.defaults = {
@@ -61,20 +85,21 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(config: Config): void {
-  const content = JSON.stringify(config, null, 2) + '\n';
-  const tmpPath = CONFIG_PATH + '.tmp';
+  const { path: configPath, format } = detectConfigPath();
+  const content = serializeConfig(config, format);
+  const tmpPath = configPath + '.tmp';
 
   // Write to temp file
   writeFileSync(tmpPath, content, 'utf-8');
 
   // Validate the temp file parses correctly and has required fields
-  const parsed = JSON.parse(readFileSync(tmpPath, 'utf-8')) as Config;
+  const parsed = parseConfig(readFileSync(tmpPath, 'utf-8'), format);
   if (!parsed.channels || typeof parsed.channels !== 'object') {
     throw new Error('saveConfig: validation failed — "channels" must be an object');
   }
 
   // Atomic rename: temp → original
-  renameSync(tmpPath, CONFIG_PATH);
+  renameSync(tmpPath, configPath);
 }
 
 export function getChannelConfig(config: Config, channelId: string): ChannelConfig | null {
