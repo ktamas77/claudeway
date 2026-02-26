@@ -1,4 +1,10 @@
-import { markdownToSlackMrkdwn, splitMessage, formatDuration } from '../slack.js';
+import {
+  markdownToSlackMrkdwn,
+  splitMessage,
+  formatDuration,
+  formatTimeout,
+  formatChannelConfig,
+} from '../slack.js';
 
 describe('markdownToSlackMrkdwn', () => {
   describe('links', () => {
@@ -215,5 +221,62 @@ describe('formatDuration', () => {
 
   it('formats 0 seconds as "0s"', () => {
     expect(formatDuration(ago(0))).toBe('0s');
+  });
+});
+
+describe('formatTimeout', () => {
+  it('formats sub-minute as seconds', () => {
+    expect(formatTimeout(45_000)).toBe('45s');
+  });
+
+  it('formats exactly 60s as "1m"', () => {
+    expect(formatTimeout(60_000)).toBe('1m');
+  });
+
+  it('formats minutes without remaining seconds', () => {
+    expect(formatTimeout(300_000)).toBe('5m');
+  });
+
+  it('formats hours and minutes', () => {
+    expect(formatTimeout(3_660_000)).toBe('1h 1m');
+  });
+
+  it('formats exactly 1 hour', () => {
+    expect(formatTimeout(3_600_000)).toBe('1h 0m');
+  });
+});
+
+describe('formatChannelConfig', () => {
+  it('formats a channel config with all fields', () => {
+    const result = formatChannelConfig('C001', {
+      folder: '/projects/test',
+      model: 'opus',
+      responseMode: 'stream-native',
+      processMode: 'persistent',
+      timeoutMs: 300_000,
+    });
+    expect(result).toBe(
+      [
+        '<#C001>',
+        '• Folder: `/projects/test`',
+        '• Model: `opus`',
+        '• Mode: `stream-native` / `persistent`',
+        '• Timeout: 5m',
+      ].join('\n'),
+    );
+  });
+
+  it('formats a minimal channel config', () => {
+    const result = formatChannelConfig('C999', {
+      folder: '.',
+      model: 'sonnet',
+      responseMode: 'batch',
+      processMode: 'oneshot',
+      timeoutMs: 60_000,
+    });
+    expect(result).toContain('<#C999>');
+    expect(result).toContain('`sonnet`');
+    expect(result).toContain('`batch` / `oneshot`');
+    expect(result).toContain('1m');
   });
 });

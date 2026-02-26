@@ -983,6 +983,58 @@ async function handleNudge(
   }
 }
 
+export function formatTimeout(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds >= 3600)
+    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m`;
+  return `${seconds}s`;
+}
+
+export function formatChannelConfig(
+  channelId: string,
+  resolved: {
+    folder: string;
+    model: string;
+    responseMode: string;
+    processMode: string;
+    timeoutMs: number;
+  },
+): string {
+  return [
+    `<#${channelId}>`,
+    `• Folder: \`${resolved.folder}\``,
+    `• Model: \`${resolved.model}\``,
+    `• Mode: \`${resolved.responseMode}\` / \`${resolved.processMode}\``,
+    `• Timeout: ${formatTimeout(resolved.timeoutMs)}`,
+  ].join('\n');
+}
+
+async function handleConfig(channelId: string, threadTs: string, client: WebClient): Promise<void> {
+  const config = loadConfig();
+  const resolved = resolvedChannelConfig(config, channelId);
+
+  let text: string;
+  if (resolved) {
+    // In a configured channel — show this channel's config
+    text = `:gear: *Channel Configuration*\n\n${formatChannelConfig(channelId, resolved)}`;
+  } else {
+    // System channel or non-configured channel — list all
+    const entries = Object.entries(config.channels);
+    if (entries.length === 0) {
+      text = ':gear: *No channels configured*';
+    } else {
+      const lines = entries.map(([id]) => {
+        const r = resolvedChannelConfig(config, id)!;
+        return formatChannelConfig(id, r);
+      });
+      text = `:gear: *Claudeway Configuration*\n${entries.length} channel${entries.length !== 1 ? 's' : ''} configured\n\n${lines.join('\n\n')}`;
+    }
+  }
+
+  await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text });
+}
+
 async function handleMagicCommand(
   text: string,
   channelId: string,
@@ -990,6 +1042,11 @@ async function handleMagicCommand(
   client: WebClient,
 ): Promise<boolean> {
   const trimmed = text.trim();
+
+  if (trimmed === '!config') {
+    await handleConfig(channelId, threadTs, client);
+    return true;
+  }
 
   if (trimmed === '!ps') {
     await handlePs(channelId, threadTs, client);

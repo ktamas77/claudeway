@@ -123,7 +123,7 @@ for (const [id, ch] of Object.entries(config.channels)) {
 
 await notifySystemChannel(
   app,
-  `:rocket: Claudeway started (${channelCount} channel${channelCount === 1 ? '' : 's'} configured)`,
+  `:rocket: Claudeway started. ${channelCount} channel${channelCount === 1 ? '' : 's'} configured. \`!config\` to list.`,
 );
 
 // Drain any messages left in queue from before restart
