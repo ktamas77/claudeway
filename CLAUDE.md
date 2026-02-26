@@ -23,6 +23,14 @@ Claudeway is a Slack-to-Claude Code CLI gateway. Messages arrive via Slack Socke
 - One message processed at a time per channel (serialized via `channelBusy` set)
 - Bot does NOT programmatically join Slack channels — requires manual `/invite` + config entry
 
+## Branch Strategy (Fork)
+
+- `main` — synced with `upstream` (`ktamas77/claudeway`), used as base for upstream PRs
+- `my-main` — personal running branch with private features, rebased on `main`
+- `feature/*` — for upstream PRs, branch off `main`; for private features, merge into `my-main` only
+
+Remotes: `origin` = `szerintedmi/claudeway` (fork), `upstream` = `ktamas77/claudeway` (original)
+
 ## Development
 
 ```bash
