@@ -246,6 +246,7 @@ class NativeStreamingResponder {
   private fullText = '';
   private thinkingTs: string | null;
   private finished = false;
+  private appendChain: Promise<void> = Promise.resolve();
 
   constructor(client: WebClient, channel: string, threadTs: string, thinkingTs?: string) {
     this.client = client;
@@ -270,13 +271,21 @@ class NativeStreamingResponder {
         this.client.chat.delete({ channel: this.channel, ts }).catch(() => {});
       }
       // Feed the accumulated text as the first append
-      this.streamer.append({ markdown_text: text }).catch((err) => {
-        console.error('[native-stream] Failed to append initial text:', err);
-      });
+      this.appendChain = this.appendChain
+        .then(async () => {
+          await this.streamer!.append({ markdown_text: text });
+        })
+        .catch((err) => {
+          console.error('[native-stream] Failed to append initial text:', err);
+        });
     } else if (this.streamer) {
-      this.streamer.append({ markdown_text: text }).catch((err) => {
-        console.error('[native-stream] Failed to append text:', err);
-      });
+      this.appendChain = this.appendChain
+        .then(async () => {
+          await this.streamer!.append({ markdown_text: text });
+        })
+        .catch((err) => {
+          console.error('[native-stream] Failed to append text:', err);
+        });
     }
   }
 
@@ -294,6 +303,7 @@ class NativeStreamingResponder {
     }
     if (this.streamer) {
       try {
+        await this.appendChain;
         await this.streamer.stop();
       } catch (err) {
         console.error('[native-stream] Failed to stop stream:', err);
