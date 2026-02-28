@@ -4,6 +4,7 @@ import { resolve, join } from 'path';
 export interface QueuedMessage {
   channelId: string;
   userId: string;
+  teamId?: string;
   text: string;
   ts: string;
   threadTs: string;
